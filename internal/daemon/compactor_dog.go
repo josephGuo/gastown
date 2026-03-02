@@ -9,6 +9,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/reaper"
 )
 
 const (
@@ -201,7 +202,7 @@ func (d *Daemon) compactorDatabases() []string {
 			}
 		}
 	}
-	return d.discoverDoltDatabases()
+	return reaper.DefaultDatabases
 }
 
 // compactorCountCommits counts the number of commits in the database's dolt_log.
