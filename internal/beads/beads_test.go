@@ -37,7 +37,7 @@ func TestListOptions(t *testing.T) {
 func TestCreateOptions(t *testing.T) {
 	opts := CreateOptions{
 		Title:       "Test issue",
-		Label:       "gt:task",
+		Labels:      []string{"gt:task"},
 		Priority:    2,
 		Description: "A test description",
 		Parent:      "gt-abc",

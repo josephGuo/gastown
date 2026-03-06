@@ -4,18 +4,16 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 func TestBuildWitnessStartCommand_UsesRoleConfig(t *testing.T) {
 	t.Parallel()
-	roleDef := &config.RoleDefinition{
-		Session: config.RoleSessionConfig{
-			StartCommand: "exec run --town {town} --rig {rig} --role {role}",
-		},
+	roleCfg := &beads.RoleConfig{
+		StartCommand: "exec run --town {town} --rig {rig} --role {role}",
 	}
 
-	got, err := buildWitnessStartCommand("/town/rig", "gastown", "/town", "", "", roleDef)
+	got, err := buildWitnessStartCommand("/town/rig", "gastown", "/town", "", "", roleCfg)
 	if err != nil {
 		t.Fatalf("buildWitnessStartCommand: %v", err)
 	}
@@ -43,13 +41,11 @@ func TestBuildWitnessStartCommand_DefaultsToRuntime(t *testing.T) {
 
 func TestBuildWitnessStartCommand_AgentOverrideWins(t *testing.T) {
 	t.Parallel()
-	roleDef := &config.RoleDefinition{
-		Session: config.RoleSessionConfig{
-			StartCommand: "exec run --role {role}",
-		},
+	roleCfg := &beads.RoleConfig{
+		StartCommand: "exec run --role {role}",
 	}
 
-	got, err := buildWitnessStartCommand("/town/rig", "gastown", "/town", "", "codex", roleDef)
+	got, err := buildWitnessStartCommand("/town/rig", "gastown", "/town", "", "codex", roleCfg)
 	if err != nil {
 		t.Fatalf("buildWitnessStartCommand: %v", err)
 	}

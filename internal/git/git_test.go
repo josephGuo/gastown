@@ -1689,6 +1689,7 @@ func TestCleanExcludingRuntime(t *testing.T) {
 				t.Errorf("CleanExcludingRuntime() = %v, want %v", got, tt.want)
 			}
 		})
+	}
 }
 
 func TestCheckBranchContamination(t *testing.T) {
