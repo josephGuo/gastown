@@ -3362,11 +3362,13 @@ func (t *Tmux) SetCycleBindings(session string) error {
 // See: https://github.com/steveyegge/gastown/issues/13
 // See: https://github.com/steveyegge/gastown/issues/1548
 func (t *Tmux) SetFeedBinding(session string) error {
-	// Skip if already configured — preserves user's original fallback from first call
-	if t.isGTBinding("prefix", "a") {
+	pattern := sessionPrefixPattern()
+	// Skip if already configured with the current rig prefix pattern.
+	// Must re-bind if the pattern is stale (e.g., after gt rig add adds a new prefix).
+	if t.isGTBinding("prefix", "a") && t.isGTBindingCurrent("prefix", "a", pattern) {
 		return nil
 	}
-	ifShell := fmt.Sprintf("echo '#{session_name}' | grep -Eq '%s'", sessionPrefixPattern())
+	ifShell := fmt.Sprintf("echo '#{session_name}' | grep -Eq '%s'", pattern)
 	fallback := t.getKeyBinding("prefix", "a")
 	if fallback == "" {
 		// No prior binding — do nothing in non-GT sessions
@@ -3388,11 +3390,13 @@ func (t *Tmux) SetFeedBinding(session string) error {
 // press is silently ignored.
 // See: https://github.com/steveyegge/gastown/issues/1548
 func (t *Tmux) SetAgentsBinding(session string) error {
-	// Skip if already configured — preserves user's original fallback from first call
-	if t.isGTBinding("prefix", "g") {
+	pattern := sessionPrefixPattern()
+	// Skip if already configured with the current rig prefix pattern.
+	// Must re-bind if the pattern is stale (e.g., after gt rig add adds a new prefix).
+	if t.isGTBinding("prefix", "g") && t.isGTBindingCurrent("prefix", "g", pattern) {
 		return nil
 	}
-	ifShell := fmt.Sprintf("echo '#{session_name}' | grep -Eq '%s'", sessionPrefixPattern())
+	ifShell := fmt.Sprintf("echo '#{session_name}' | grep -Eq '%s'", pattern)
 	fallback := t.getKeyBinding("prefix", "g")
 	if fallback == "" {
 		// No prior binding — do nothing in non-GT sessions

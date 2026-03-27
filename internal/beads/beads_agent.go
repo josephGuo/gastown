@@ -54,6 +54,7 @@ type AgentFields struct {
 	MRID           string // MR bead ID (if MR was created)
 	Branch         string // Polecat working branch name
 	MRFailed       bool   // True when MR creation was attempted but failed
+	PushFailed     bool   // True when branch push to origin failed (gas-556)
 	CompletionTime string // RFC3339 timestamp of when gt done was called
 }
 
@@ -126,6 +127,9 @@ func FormatAgentDescription(title string, fields *AgentFields) string {
 	if fields.MRFailed {
 		lines = append(lines, "mr_failed: true")
 	}
+	if fields.PushFailed {
+		lines = append(lines, "push_failed: true")
+	}
 	if fields.CompletionTime != "" {
 		lines = append(lines, fmt.Sprintf("completion_time: %s", fields.CompletionTime))
 	}
@@ -180,6 +184,8 @@ func ParseAgentFields(description string) *AgentFields {
 			fields.Branch = value
 		case "mr_failed":
 			fields.MRFailed = value == "true"
+		case "push_failed":
+			fields.PushFailed = value == "true"
 		case "completion_time":
 			fields.CompletionTime = value
 		}
@@ -416,14 +422,14 @@ func (b *Beads) ResetAgentBeadForReuse(id, reason string) error {
 }
 
 // UpdateAgentState updates the agent_state field in an agent bead.
-// Uses `bd agent state` command for the database column directly,
+// Uses `bd set-state` (bd 0.62.0+) to update the state dimension,
 // then syncs the description's agent_state field to match (gt-ulom).
 func (b *Beads) UpdateAgentState(id string, state string) (retErr error) {
 	defer func() { telemetry.RecordAgentStateChange(context.Background(), id, state, nil, retErr) }()
-	// Update agent state using bd agent state command
+	// Update agent state using bd set-state command (bd 0.62.0+).
 	// Use runWithRouting so bd can resolve cross-prefix agent beads (e.g., wa-*
 	// agent beads from hq context) via routes.jsonl instead of BEADS_DIR.
-	_, err := b.runWithRouting("agent", "state", id, state)
+	_, err := b.runWithRouting("set-state", id, "agent_state="+state)
 	if err != nil {
 		return fmt.Errorf("updating agent state: %w", err)
 	}
@@ -456,6 +462,7 @@ type AgentFieldUpdates struct {
 	MRID           *string
 	Branch         *string
 	MRFailed       *bool
+	PushFailed     *bool // True when branch push to origin failed (gas-556)
 	CompletionTime *string
 }
 
@@ -516,6 +523,9 @@ func (b *Beads) UpdateAgentDescriptionFields(id string, updates AgentFieldUpdate
 	if updates.MRFailed != nil {
 		fields.MRFailed = *updates.MRFailed
 	}
+	if updates.PushFailed != nil {
+		fields.PushFailed = *updates.PushFailed
+	}
 	if updates.CompletionTime != nil {
 		fields.CompletionTime = *updates.CompletionTime
 	}
@@ -555,6 +565,7 @@ type CompletionMetadata struct {
 	Branch         string // Polecat working branch
 	HookBead       string // The work bead ID
 	MRFailed       bool   // True when MR creation was attempted but failed
+	PushFailed     bool   // True when branch push to origin failed (gas-556)
 	CompletionTime string // RFC3339 timestamp
 }
 
@@ -562,11 +573,13 @@ type CompletionMetadata struct {
 // to an agent bead. Called by gt done to record completion state.
 func (b *Beads) UpdateAgentCompletion(id string, meta *CompletionMetadata) error {
 	mrFailed := meta.MRFailed
+	pushFailed := meta.PushFailed
 	return b.UpdateAgentDescriptionFields(id, AgentFieldUpdates{
 		ExitType:       &meta.ExitType,
 		MRID:           &meta.MRID,
 		Branch:         &meta.Branch,
 		MRFailed:       &mrFailed,
+		PushFailed:     &pushFailed,
 		CompletionTime: &meta.CompletionTime,
 	})
 }
@@ -581,6 +594,7 @@ func (b *Beads) ClearAgentCompletion(id string) error {
 		MRID:           &empty,
 		Branch:         &empty,
 		MRFailed:       &notFailed,
+		PushFailed:     &notFailed,
 		CompletionTime: &empty,
 	})
 }
