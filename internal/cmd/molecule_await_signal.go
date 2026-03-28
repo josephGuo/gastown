@@ -87,10 +87,11 @@ var moleculeAwaitSignalShortcutCmd = &cobra.Command{
 
 // AwaitSignalResult is the result of an await-signal operation.
 type AwaitSignalResult struct {
-	Reason     string        `json:"reason"`               // "signal" or "timeout"
-	Elapsed    time.Duration `json:"elapsed"`              // how long we waited
-	Signal     string        `json:"signal,omitempty"`     // the line that woke us (if signal)
-	IdleCycles int           `json:"idle_cycles,omitempty"` // current idle cycle count (after update)
+	Reason      string        `json:"reason"`                // "signal" or "timeout"
+	Elapsed     time.Duration `json:"elapsed"`               // how long we waited
+	Signal      string        `json:"signal,omitempty"`      // the line that woke us (if signal)
+	IdleCycles  int           `json:"idle_cycles,omitempty"` // current idle cycle count (after update)
+	EffortLevel string        `json:"effort_level"`          // "full" or "abbreviated"
 }
 
 func init() {
@@ -265,6 +266,15 @@ func runMoleculeAwaitSignal(cmd *cobra.Command, args []string) error {
 		_ = clearAgentBackoffUntil(awaitSignalAgentBead, beadsDir)
 	}
 
+	// Set effort level based on idle cycles.
+	// On signal (activity detected) or first cycle (idle=0): full effort.
+	// On timeout with idle > 0: abbreviated effort (skip optional patrol steps).
+	if result.Reason == "signal" || result.IdleCycles == 0 {
+		result.EffortLevel = "full"
+	} else {
+		result.EffortLevel = "abbreviated"
+	}
+
 	// Output result
 	if moleculeJSON {
 		enc := json.NewEncoder(os.Stdout)
@@ -293,6 +303,15 @@ func runMoleculeAwaitSignal(cmd *cobra.Command, args []string) error {
 				fmt.Printf("%s Timeout after %v (no activity)\n",
 					style.Dim.Render("⏱"), result.Elapsed.Round(time.Millisecond))
 			}
+		}
+
+		// Output effort recommendation for the next patrol cycle.
+		if result.EffortLevel == "abbreviated" {
+			fmt.Printf("\n%s Run ABBREVIATED patrol: quick checks only, skip optional steps.\n",
+				style.Bold.Render("EFFORT: reduced"))
+		} else {
+			fmt.Printf("\n%s Run full patrol.\n",
+				style.Bold.Render("EFFORT: full"))
 		}
 	}
 
