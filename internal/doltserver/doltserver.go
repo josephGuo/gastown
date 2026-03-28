@@ -1476,20 +1476,51 @@ func Start(townRoot string) error {
 	// Quarantine corrupted/phantom database dirs before server launch.
 	// Dolt auto-discovers ALL dirs in --data-dir. A phantom dir with a broken
 	// noms store (missing manifest) crashes the ENTIRE server. (gt-hs1i2)
+	//
+	// Safety: move to .quarantine/ instead of deleting, and skip large databases
+	// that are likely legitimate but temporarily corrupted. (gt-xvh)
 	if entries, readErr := os.ReadDir(config.DataDir); readErr == nil {
 		for _, entry := range entries {
 			if !entry.IsDir() {
 				continue
 			}
-			doltDir := filepath.Join(config.DataDir, entry.Name(), ".dolt")
+			name := entry.Name()
+			if strings.HasPrefix(name, ".") {
+				continue // Skip hidden dirs (.dolt, .doltcfg, .quarantine, etc.)
+			}
+			dbDir := filepath.Join(config.DataDir, name)
+			doltDir := filepath.Join(dbDir, ".dolt")
 			if _, statErr := os.Stat(doltDir); statErr != nil {
 				continue // Not a dolt dir at all — skip
 			}
 			manifest := filepath.Join(doltDir, "noms", "manifest")
-			if _, statErr := os.Stat(manifest); statErr != nil {
-				// Corrupted phantom — remove it so Dolt won't try to load it
-				fmt.Fprintf(os.Stderr, "Quarantine: removing corrupted database dir %q (missing noms/manifest)\n", entry.Name())
-				_ = os.RemoveAll(filepath.Join(config.DataDir, entry.Name()))
+			if _, statErr := os.Stat(manifest); statErr == nil {
+				continue // Manifest exists — healthy database
+			}
+			// Missing manifest — this database would crash the server.
+			// Check size: large databases (>1MB) are likely legitimate databases
+			// with a transient corruption, not empty phantoms. Move instead of delete.
+			size := dirSize(dbDir)
+			quarantineDir := filepath.Join(config.DataDir, ".quarantine")
+			if err := os.MkdirAll(quarantineDir, 0755); err != nil {
+				fmt.Fprintf(os.Stderr, "Quarantine: failed to create quarantine dir: %v\n", err)
+				continue
+			}
+			dest := filepath.Join(quarantineDir, fmt.Sprintf("%s.%d", name, time.Now().Unix()))
+			if err := os.Rename(dbDir, dest); err != nil {
+				// Cross-device rename fails — fall back to removal only for tiny dirs
+				if size > 1<<20 { // >1MB — refuse to destroy, just warn
+					fmt.Fprintf(os.Stderr, "Quarantine: SKIPPING large database %q (%s, missing noms/manifest) — move failed: %v\n",
+						name, formatBytes(size), err)
+					fmt.Fprintf(os.Stderr, "  Manual fix: mv %s %s\n", dbDir, dest)
+				} else {
+					fmt.Fprintf(os.Stderr, "Quarantine: removing small phantom database dir %q (%s, missing noms/manifest)\n",
+						name, formatBytes(size))
+					_ = os.RemoveAll(dbDir)
+				}
+			} else {
+				fmt.Fprintf(os.Stderr, "Quarantine: moved database %q to %s (%s, missing noms/manifest)\n",
+					name, dest, formatBytes(size))
 			}
 		}
 	}
@@ -2648,12 +2679,25 @@ func RemoveDatabase(townRoot, dbName string, force bool) error {
 		return fmt.Errorf("database %q not found at %s", dbName, dbPath)
 	}
 
-	// Safety check: if DB has real data and force is not set, refuse. (gt-q8f6n)
+	// Safety check: if DB has real data and force is not set, refuse. (gt-q8f6n, gt-xvh)
 	// This prevents destroying legitimate databases that happen to be unreferenced.
 	running, _, _ := IsRunning(townRoot)
-	if running && !force {
-		if hasData, _ := databaseHasUserTables(townRoot, dbName); hasData {
-			return fmt.Errorf("database %q has user tables — use --force to remove", dbName)
+	if !force {
+		if running {
+			// Server is up — check via SQL for user tables
+			if hasData, _ := databaseHasUserTables(townRoot, dbName); hasData {
+				return fmt.Errorf("database %q has user tables — use --force to remove", dbName)
+			}
+		} else {
+			// Server is down — check via filesystem size as a safety proxy. (gt-xvh)
+			// Databases with >1MB of data are almost certainly not empty orphans.
+			// Without the server, we can't query tables, so size is the best heuristic.
+			size := dirSize(dbPath)
+			const safeRemoveThreshold = 1 << 20 // 1MB
+			if size > safeRemoveThreshold {
+				return fmt.Errorf("database %q has %s of data (server offline, cannot verify contents) — start server or use --force to remove",
+					dbName, formatBytes(size))
+			}
 		}
 	}
 
@@ -3019,14 +3063,31 @@ func EnsureAllMetadata(townRoot string) (updated []string, errs []error) {
 		dbToRig[k] = v
 	}
 
+	// Group candidate database names by rig. When routes.jsonl and rigs.json
+	// use different prefixes for the same rig (e.g. "gas" vs "gt" both map to
+	// "gastown"), multiple databases may exist for the same rig. Processing
+	// them all causes oscillation: each one overwrites the other's
+	// dolt_database correction on every startup. (gas-ar0)
+	rigCandidates := make(map[string][]string) // rig -> candidate db names
 	for _, dbName := range databases {
 		rigName := dbName
 		if mapped, ok := dbToRig[dbName]; ok {
 			rigName = mapped
 		}
-		// Special case: "hq" database maps to "hq" rig (town-level)
 		if dbName == "hq" {
 			rigName = "hq"
+		}
+		rigCandidates[rigName] = append(rigCandidates[rigName], dbName)
+	}
+
+	for rigName, candidates := range rigCandidates {
+		// When multiple databases map to the same rig, choose one effective
+		// DB name: prefer whatever is already in metadata.json (if it's among
+		// the valid candidates) to avoid spurious mismatch warnings. Fall back
+		// to the first candidate (alphabetical, from os.ReadDir ordering).
+		dbName := candidates[0]
+		if len(candidates) > 1 {
+			dbName = pickDBForRig(townRoot, rigName, candidates)
 		}
 		// Pass dbName explicitly so EnsureMetadata writes the correct
 		// dolt_database value ("be") rather than the rig dir name ("beads_el").
@@ -3038,6 +3099,28 @@ func EnsureAllMetadata(townRoot string) (updated []string, errs []error) {
 	}
 
 	return updated, errs
+}
+
+// pickDBForRig selects which database name to use for a rig when multiple
+// candidates exist. Prefers the value already in metadata.json to avoid
+// oscillating corrections between two valid aliases for the same rig.
+func pickDBForRig(townRoot, rigName string, candidates []string) string {
+	beadsDir := FindRigBeadsDir(townRoot, rigName)
+	if beadsDir != "" {
+		if data, err := os.ReadFile(filepath.Join(beadsDir, "metadata.json")); err == nil {
+			var meta map[string]interface{}
+			if json.Unmarshal(data, &meta) == nil {
+				if existingDB, _ := meta["dolt_database"].(string); existingDB != "" {
+					for _, c := range candidates {
+						if c == existingDB {
+							return c // Already correct — no repair needed
+						}
+					}
+				}
+			}
+		}
+	}
+	return candidates[0] // Default: first (alphabetical from os.ReadDir)
 }
 
 // buildDatabaseToRigMap loads routes.jsonl and builds a map from database name
