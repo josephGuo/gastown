@@ -1870,7 +1870,7 @@ func fetchAgentBeadSnapshot(bd *BdCli, workDir, agentBeadID string) *agentBeadSn
 	}
 
 	return &agentBeadSnapshot{
-		AgentState: issues[0].AgentState,
+		AgentState: beads.ResolveAgentState(issues[0].Description, issues[0].AgentState),
 		HookBead:   issues[0].HookBead,
 		Labels:     issues[0].Labels,
 		UpdatedAt:  issues[0].UpdatedAt,
@@ -1966,14 +1966,15 @@ func getAgentBeadState(bd *BdCli, workDir, agentBeadID string) (agentState, hook
 
 	// Parse JSON response — bd show --json returns an array
 	var issues []struct {
-		AgentState string `json:"agent_state"`
-		HookBead   string `json:"hook_bead"`
+		AgentState  string `json:"agent_state"`
+		HookBead    string `json:"hook_bead"`
+		Description string `json:"description"`
 	}
 	if err := json.Unmarshal([]byte(output), &issues); err != nil || len(issues) == 0 {
 		return "", ""
 	}
 
-	return issues[0].AgentState, issues[0].HookBead
+	return beads.ResolveAgentState(issues[0].Description, issues[0].AgentState), issues[0].HookBead
 }
 
 // getAgentBeadAge returns the time since the agent bead was last updated.

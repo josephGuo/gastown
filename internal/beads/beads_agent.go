@@ -239,14 +239,19 @@ func (b *Beads) CreateAgentBead(id, title string, fields *AgentFields) (*Issue, 
 		return a
 	}
 
-	// Create agent bead in the issues table. Agent beads are durable
-	// identities that must survive wisp GC (GH#2768).
-	out, err := b.run(buildArgs()...)
+	// Create agent bead in the target database. Use a routed Beads instance
+	// when the bead's prefix routes to a different rig than our own database.
+	// Without this, agent beads for rig polecats (e.g., be-beads-polecat-rust)
+	// would be created in the wrong database, failing type validation.
+	target := b
+	if targetDir != b.getResolvedBeadsDir() {
+		target = NewWithBeadsDir(filepath.Dir(targetDir), targetDir)
+	}
+
+	out, err := target.run(buildArgs()...)
 	if err != nil {
-		out, err = b.run(buildArgs()...)
+		out, err = target.run(buildArgs()...)
 		if err != nil {
-			// Both bd create attempts failed. Dolt server is required —
-			// no JSONL fallback. Surface the error directly.
 			return nil, fmt.Errorf("creating %s: bd create failed: %w", id, err)
 		}
 	}
@@ -257,16 +262,7 @@ func (b *Beads) CreateAgentBead(id, title string, fields *AgentFields) (*Issue, 
 	}
 
 	// Note: role slot no longer set - role definitions are config-based
-
-	// Set hook_bead slot so gt mol status can find hooked work via the
-	// agent bead's JSON field (primary lookup path in lookupHookedWork).
-	// The fallback query (status=hooked + assignee) is unreliable for
-	// cross-database scenarios. Restoring per hq-gfg.
-	if fields != nil && fields.HookBead != "" {
-		if _, slotErr := b.run("slot", "set", id, "hook", fields.HookBead); slotErr != nil {
-			// Non-fatal: fallback query may still find the work bead
-		}
-	}
+	// Note: hook_bead slot no longer set - bd slot removed in v0.62 (hq-l6mm5)
 
 	return &issue, nil
 }
@@ -351,15 +347,7 @@ func (b *Beads) CreateOrReopenAgentBead(id, title string, fields *AgentFields) (
 	}
 
 	// Note: role slot no longer set - role definitions are config-based
-
-	// Set hook_bead slot so gt mol status can find hooked work via the
-	// agent bead's JSON field (primary lookup path in lookupHookedWork).
-	// Restoring per hq-gfg.
-	if fields != nil && fields.HookBead != "" {
-		if _, slotErr := target.run("slot", "set", id, "hook", fields.HookBead); slotErr != nil {
-			// Non-fatal: fallback query may still find the work bead
-		}
-	}
+	// Note: hook_bead slot no longer set - bd slot removed in v0.62 (hq-l6mm5)
 
 	// Return the updated bead
 	return target.Show(id)
@@ -422,26 +410,20 @@ func (b *Beads) ResetAgentBeadForReuse(id, reason string) error {
 }
 
 // UpdateAgentState updates the agent_state field in an agent bead.
-// Uses `bd set-state` (bd 0.62.0+) to update the state dimension,
-// then syncs the description's agent_state field to match (gt-ulom).
+// bd >= 0.62.0 no longer provides a supported `bd agent state` writer, so
+// Gastown writes agent_state through the description field and readers mirror
+// that contract with fallback to the legacy structured column via ResolveAgentState.
+//
+// Resolves the concrete target DB first so the update hits the correct database
+// when the agent bead routes to a different beads dir via routes.jsonl.
 func (b *Beads) UpdateAgentState(id string, state string) (retErr error) {
 	defer func() { telemetry.RecordAgentStateChange(context.Background(), id, state, nil, retErr) }()
-	// Update agent state using bd set-state command (bd 0.62.0+).
-	// Use runWithRouting so bd can resolve cross-prefix agent beads (e.g., wa-*
-	// agent beads from hq context) via routes.jsonl instead of BEADS_DIR.
-	// Best-effort: agent beads are ephemeral (wisps, not in the SQL issues table),
-	// so set-state fails with FK violation on child_counters → issues. When this
-	// happens, fall through to UpdateAgentDescriptionFields which works on wisps
-	// and is the authoritative read path for agent state. (gt-4ao)
-	_, err := b.runWithRouting("set-state", id, "agent_state="+state)
-	if err != nil {
-		_ = err // Log but don't fail — description field update below is the fallback.
+	targetDir := ResolveRoutingTarget(b.getTownRoot(), id, b.getResolvedBeadsDir())
+	target := b
+	if targetDir != b.getResolvedBeadsDir() {
+		target = NewWithBeadsDir(filepath.Dir(targetDir), targetDir)
 	}
-
-	// Sync the description's agent_state field (gt-ulom).
-	// This is also the primary fallback when set-state fails on ephemeral
-	// agent beads (gt-4ao).
-	return b.UpdateAgentDescriptionFields(id, AgentFieldUpdates{AgentState: &state})
+	return target.UpdateAgentDescriptionFields(id, AgentFieldUpdates{AgentState: &state})
 }
 
 // SetHookBead and ClearHookBead removed (hq-l6mm5).
@@ -636,12 +618,7 @@ func (b *Beads) GetAgentBead(id string) (*Issue, *AgentFields, error) {
 	}
 
 	fields := ParseAgentFields(issue.Description)
-	// Prefer the structured agent_state column when present.
-	// Some writers (for example, `bd agent state`) update the DB column directly
-	// without rewriting the description text, so description-derived state can be stale.
-	if issue.AgentState != "" {
-		fields.AgentState = issue.AgentState
-	}
+	fields.AgentState = ResolveAgentState(issue.Description, issue.AgentState)
 	return issue, fields, nil
 }
 

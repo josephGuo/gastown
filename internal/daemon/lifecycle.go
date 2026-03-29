@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -581,8 +580,7 @@ func (d *Daemon) setSessionEnvironment(sessionName string, roleConfig *beads.Rol
 	// canonical qualified values (e.g., GT_ROLE). See: https://github.com/steveyegge/gastown/issues/2492
 	if roleConfig != nil {
 		for k, v := range roleConfig.EnvVars {
-			if existing, alreadySet := envVars[k]; alreadySet {
-				log.Printf("daemon env: skipping TOML %s=%q (AgentEnv already set %q)", k, v, existing)
+			if _, alreadySet := envVars[k]; alreadySet {
 				continue
 			}
 			expanded := beads.ExpandRolePattern(v, d.config.TownRoot, parsed.RigName, parsed.AgentName, parsed.RoleType, session.PrefixFor(parsed.RigName))
@@ -771,7 +769,7 @@ func (d *Daemon) closeMessage(id string) error {
 type AgentBeadInfo struct {
 	ID         string `json:"id"`
 	Type       string `json:"issue_type"`
-	State      string // From DB column (agent_state), fallback to description
+	State      string // From description agent_state, fallback to legacy DB column
 	HookBead   string // From DB column (hook_bead)
 	RoleType   string // Parsed from description: role_type
 	Rig        string // Parsed from description: rig
@@ -840,15 +838,7 @@ func (d *Daemon) getAgentBeadInfo(agentBeadID string) (*AgentBeadInfo, error) {
 		info.Rig = fields.Rig
 	}
 
-	// Use AgentState from database column directly (not from description).
-	// UpdateAgentState updates the DB column but not the description text,
-	// so the description can contain stale state (e.g., "spawning" after
-	// the polecat has transitioned to "working"). Fall back to description
-	// only if the DB column is empty (legacy beads).
-	info.State = issue.AgentState
-	if info.State == "" && fields != nil {
-		info.State = fields.AgentState
-	}
+	info.State = beads.ResolveAgentState(issue.Description, issue.AgentState)
 
 	// Use HookBead from database column directly (not from description)
 	// The description may contain stale data - the slot is the source of truth.
@@ -1086,9 +1076,11 @@ func (d *Daemon) checkRigGUPPViolations(rigName string) {
 			continue // No hooked work - no GUPP violation possible
 		}
 
+		agentState := beads.ResolveAgentState(agent.Description, agent.AgentState)
+
 		// Skip nuked agents — they're intentionally terminated and should not
 		// trigger alerts even if stale hook_bead data remains in the database.
-		if beads.AgentState(agent.AgentState) == beads.AgentStateNuked {
+		if beads.AgentState(agentState) == beads.AgentStateNuked {
 			continue
 		}
 
@@ -1168,11 +1160,12 @@ func (d *Daemon) checkOrphanedWork() {
 func (d *Daemon) checkRigOrphanedWork(rigName string) {
 	// List polecat agent beads (issues + wisps tables)
 	var agents []struct {
-		ID         string   `json:"id"`
-		HookBead   string   `json:"hook_bead"`
-		AgentState string   `json:"agent_state"`
-		Labels     []string `json:"labels"`
-		Type       string   `json:"issue_type"`
+		ID          string   `json:"id"`
+		HookBead    string   `json:"hook_bead"`
+		AgentState  string   `json:"agent_state"`
+		Description string   `json:"description"`
+		Labels      []string `json:"labels"`
+		Type        string   `json:"issue_type"`
 	}
 
 	if err := d.listAgentBeadsJSON(&agents); err != nil {
@@ -1195,9 +1188,11 @@ func (d *Daemon) checkRigOrphanedWork(rigName string) {
 			continue
 		}
 
+		agentState := beads.ResolveAgentState(agent.Description, agent.AgentState)
+
 		// Skip nuked agents — they're intentionally terminated and should not
 		// trigger alerts even if stale hook_bead data remains in the database.
-		if beads.AgentState(agent.AgentState) == beads.AgentStateNuked {
+		if beads.AgentState(agentState) == beads.AgentStateNuked {
 			continue
 		}
 

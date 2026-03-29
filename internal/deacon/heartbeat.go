@@ -19,7 +19,9 @@ const (
 
 	// HeartbeatVeryStaleThreshold is the age at which a heartbeat is considered
 	// very stale, meaning the Deacon should be poked or restarted.
-	HeartbeatVeryStaleThreshold = 15 * time.Minute
+	// Must be greater than patrol backoff-max (15m) to avoid false positives
+	// during legitimate await-signal sleep.
+	HeartbeatVeryStaleThreshold = 20 * time.Minute
 )
 
 // Heartbeat represents the Deacon's heartbeat file contents.
@@ -113,7 +115,7 @@ func (hb *Heartbeat) IsFresh() bool {
 	return hb != nil && hb.Age() < HeartbeatStaleThreshold
 }
 
-// IsStale returns true if the heartbeat is 5-15 minutes old.
+// IsStale returns true if the heartbeat is 5-20 minutes old.
 // A stale heartbeat may indicate the Deacon is doing a long operation.
 func (hb *Heartbeat) IsStale() bool {
 	if hb == nil {
@@ -123,7 +125,7 @@ func (hb *Heartbeat) IsStale() bool {
 	return age >= HeartbeatStaleThreshold && age < HeartbeatVeryStaleThreshold
 }
 
-// IsVeryStale returns true if the heartbeat is more than 15 minutes old.
+// IsVeryStale returns true if the heartbeat is more than 20 minutes old.
 // A very stale heartbeat means the Deacon should be poked.
 func (hb *Heartbeat) IsVeryStale() bool {
 	return hb == nil || hb.Age() >= HeartbeatVeryStaleThreshold

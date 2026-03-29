@@ -78,10 +78,11 @@ EXAMPLES:
 
 // AwaitEventResult is the result of an await-event operation.
 type AwaitEventResult struct {
-	Reason     string        `json:"reason"`                // "event" or "timeout"
-	Elapsed    time.Duration `json:"elapsed"`               // how long we waited
-	Events     []EventFile   `json:"events,omitempty"`      // event files found
-	IdleCycles int           `json:"idle_cycles,omitempty"` // current idle cycle count
+	Reason      string        `json:"reason"`                // "event" or "timeout"
+	Elapsed     time.Duration `json:"elapsed"`               // how long we waited
+	Events      []EventFile   `json:"events,omitempty"`      // event files found
+	IdleCycles  int           `json:"idle_cycles,omitempty"` // current idle cycle count
+	EffortLevel string        `json:"effort_level"`          // "full" or "abbreviated"
 }
 
 // EventFile represents a single event file.
@@ -238,6 +239,13 @@ func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Set effort level based on idle cycles.
+	if result.Reason == "event" || result.IdleCycles == 0 {
+		result.EffortLevel = "full"
+	} else {
+		result.EffortLevel = "abbreviated"
+	}
+
 	// Output
 	if moleculeJSON {
 		enc := json.NewEncoder(os.Stdout)
@@ -262,6 +270,15 @@ func runMoleculeAwaitEvent(cmd *cobra.Command, args []string) error {
 		case "timeout":
 			fmt.Printf("%s Timeout after %v (idle cycle: %d)\n",
 				style.Dim.Render("⏱"), result.Elapsed.Round(time.Millisecond), result.IdleCycles)
+		}
+
+		// Output effort recommendation for the next patrol cycle.
+		if result.EffortLevel == "abbreviated" {
+			fmt.Printf("\n%s Run ABBREVIATED patrol: quick checks only, skip optional steps.\n",
+				style.Bold.Render("EFFORT: reduced"))
+		} else {
+			fmt.Printf("\n%s Run full patrol.\n",
+				style.Bold.Render("EFFORT: full"))
 		}
 	}
 
