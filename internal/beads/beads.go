@@ -454,23 +454,22 @@ func (b *Beads) getResolvedBeadsDir() string {
 // targetBeadsDirForCreate returns the database a create operation should use.
 // Rig is authoritative for MR/conflict-task creates; otherwise parent-prefixed
 // children should land beside their parent so bd can resolve the relationship.
-func (b *Beads) targetBeadsDirForCreate(opts CreateOptions) string {
+func (b *Beads) targetBeadsDirForCreate(opts CreateOptions) (string, error) {
 	fallback := b.getResolvedBeadsDir()
 	townRoot := b.getTownRoot()
 
-	if opts.Rig != "" && townRoot != "" {
-		if rigDir := GetRigDirForName(townRoot, opts.Rig); rigDir != "" {
-			if targetDir := ResolveBeadsDir(rigDir); targetDir != "" {
-				return targetDir
-			}
+	if opts.Rig != "" {
+		if targetDir, ok := ResolveRepoAliasBeadsDir(townRoot, opts.Rig); ok {
+			return targetDir, nil
 		}
+		return "", fmt.Errorf("unknown repo/rig alias %q", opts.Rig)
 	}
 
 	if opts.Parent != "" {
-		return ResolveRoutingTarget(townRoot, opts.Parent, fallback)
+		return ResolveRoutingTarget(townRoot, opts.Parent, fallback), nil
 	}
 
-	return fallback
+	return fallback, nil
 }
 
 // forIssueID returns a Beads wrapper bound to the correct beads directory for
@@ -1406,7 +1405,10 @@ func (b *Beads) Create(opts CreateOptions) (*Issue, error) {
 		return nil, fmt.Errorf("refusing to create bead: %w (got %q)", ErrFlagTitle, opts.Title)
 	}
 
-	targetDir := b.targetBeadsDirForCreate(opts)
+	targetDir, err := b.targetBeadsDirForCreate(opts)
+	if err != nil {
+		return nil, err
+	}
 	if targetDir != "" && targetDir != b.getResolvedBeadsDir() {
 		bdForCreate := &Beads{
 			workDir:    b.workDir,
@@ -1476,6 +1478,20 @@ func (b *Beads) CreateWithID(id string, opts CreateOptions) (*Issue, error) {
 	// Guard against flag-like titles (gt-e0kx5: --help garbage beads)
 	if IsFlagLikeTitle(opts.Title) {
 		return nil, fmt.Errorf("refusing to create bead: %w (got %q)", ErrFlagTitle, opts.Title)
+	}
+
+	targetDir, err := b.targetBeadsDirForCreate(opts)
+	if err != nil {
+		return nil, err
+	}
+	if targetDir != "" && targetDir != b.getResolvedBeadsDir() {
+		bdForCreate := &Beads{
+			workDir:    b.workDir,
+			beadsDir:   targetDir,
+			serverPort: b.serverPort,
+			isolated:   b.isolated,
+		}
+		return bdForCreate.CreateWithID(id, opts)
 	}
 
 	args := []string{"create", "--json", "--id=" + id}
