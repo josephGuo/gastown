@@ -652,11 +652,7 @@ func bdKvListJSONForPrime(workDir string) (map[string]string, error) {
 		return nil, err
 	}
 
-	var kvs map[string]string
-	if err := json.Unmarshal(stdout.Bytes(), &kvs); err != nil {
-		return nil, fmt.Errorf("parsing kv list: %w", err)
-	}
-	return kvs, nil
+	return parseBdKvListJSON(stdout.Bytes())
 }
 
 // runMailCheckInject runs `gt mail check --inject` and outputs the result.
