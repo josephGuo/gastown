@@ -6,10 +6,36 @@
 
 set -euo pipefail
 
-TOWN_ROOT="${GT_TOWN_ROOT:-$(gt town root 2>/dev/null)}"
-RIGS_JSON_PATH="${TOWN_ROOT}/mayor/rigs.json"
-
 log() { echo "[stuck-agent-dog] $*"; }
+
+TOWN_ROOT="${GT_TOWN_ROOT:-}"
+if [ -z "$TOWN_ROOT" ]; then
+  if ! TOWN_ROOT=$(gt town root 2>/dev/null); then
+    log "SKIP: could not resolve town root"
+    exit 0
+  fi
+fi
+
+RIGS_JSON_PATH="${TOWN_ROOT}/rigs.json"
+if [ ! -f "$RIGS_JSON_PATH" ] && [ -f "$TOWN_ROOT/mayor/rigs.json" ]; then
+  RIGS_JSON_PATH="$TOWN_ROOT/mayor/rigs.json"
+fi
+
+integer_or_default() {
+  local value="$1"
+  local default="$2"
+
+  case "$value" in
+    ''|*[!0-9]*) echo "$default" ;;
+    *) echo "$value" ;;
+  esac
+}
+
+POLECAT_MAX_INACTIVITY="${GT_STUCK_AGENT_DOG_MAX_INACTIVITY:-0s}"
+[ "$POLECAT_MAX_INACTIVITY" = "0" ] && POLECAT_MAX_INACTIVITY="0s"
+DEACON_STALE_SECONDS=$(integer_or_default "${GT_STUCK_AGENT_DOG_DEACON_STALE_SECONDS:-}" 1200)
+ACTIVITY_GRACE_SECONDS=$(integer_or_default "${GT_STUCK_AGENT_DOG_ACTIVITY_GRACE_SECONDS:-}" "$DEACON_STALE_SECONDS")
+MASS_DEATH_THRESHOLD=$(integer_or_default "${GT_STUCK_AGENT_DOG_MASS_DEATH_THRESHOLD:-}" 3)
 
 heartbeat_epoch() {
   local file="$1"
@@ -110,6 +136,17 @@ bead_restartable() {
   return 1
 }
 
+session_health_status() {
+  local session_name="$1"
+  local health_json=""
+  local status=""
+
+  health_json=$(gt session health "$session_name" --json --max-inactivity "$POLECAT_MAX_INACTIVITY" 2>/dev/null) || return 1
+  status=$(printf '%s' "$health_json" | jq -r '.status // empty' 2>/dev/null || true)
+  [ -n "$status" ] || return 1
+  printf '%s\n' "$status"
+}
+
 # --- Enumerate agents ---------------------------------------------------------
 
 log "=== Checking agent health ==="
@@ -120,7 +157,18 @@ if [ ! -f "$RIGS_JSON_PATH" ]; then
 fi
 
 # Build rig_name|prefix mapping
-RIG_PREFIX_MAP=$(jq -r '.rigs | to_entries[] | "\(.key)|\(.value.beads.prefix // .key)"' "$RIGS_JSON_PATH" 2>/dev/null)
+if ! RIG_PREFIX_MAP=$(jq -r '
+  if (.rigs | type) == "object" then
+    .rigs | to_entries[] | "\(.key)|\(.value.beads.prefix // .key)"
+  else
+    empty
+  end
+' "$RIGS_JSON_PATH" 2>/dev/null); then
+  log "SKIP: could not parse rigs.json"
+  exit 0
+fi
+
+RIG_PREFIX_MAP=$(printf '%s\n' "$RIG_PREFIX_MAP" | awk -F'|' 'NF >= 2 && $1 != "" && $2 != ""')
 if [ -z "$RIG_PREFIX_MAP" ]; then
   log "SKIP: no rigs in rigs.json"
   exit 0
@@ -142,33 +190,35 @@ while IFS='|' read -r RIG PREFIX; do
     PCAT_NAME=$(basename "$PCAT_PATH")
     SESSION_NAME="${PREFIX}-${PCAT_NAME}"
 
-    if ! tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
-      # Session dead — check hook
-      HOOK_BEAD=$(rig_hook_bead "$RIG" "$PCAT_NAME")
-
-      if [ -n "$HOOK_BEAD" ] && bead_restartable "$SESSION_NAME" "$RIG" "$HOOK_BEAD"; then
-        CRASHED+=("$SESSION_NAME|$RIG|$PCAT_NAME|$HOOK_BEAD")
-        log "  CRASHED: $SESSION_NAME (hook=$HOOK_BEAD)"
-      fi
-    else
-      # Session alive — check process
-      PANE_PID=$(tmux list-panes -t "$SESSION_NAME" -F '#{pane_pid}' 2>/dev/null | head -1 || true)
-      if [ -n "$PANE_PID" ]; then
-        PROC_COMM=$(ps -o comm= -p "$PANE_PID" 2>/dev/null || true)
-        if [ -z "$PROC_COMM" ]; then
-          # Zombie: process dead, session alive
-          HOOK_BEAD=$(rig_hook_bead "$RIG" "$PCAT_NAME")
-          if [ -n "$HOOK_BEAD" ] && bead_restartable "$SESSION_NAME" "$RIG" "$HOOK_BEAD"; then
-            STUCK+=("$SESSION_NAME|$RIG|$PCAT_NAME|$HOOK_BEAD|agent_dead")
-            log "  ZOMBIE: $SESSION_NAME (pid=$PANE_PID dead, hook=$HOOK_BEAD)"
-          fi
-        else
-          HEALTHY=$((HEALTHY + 1))
-        fi
-      else
+    HEALTH_STATUS=$(session_health_status "$SESSION_NAME" || true)
+    case "$HEALTH_STATUS" in
+      healthy)
         HEALTHY=$((HEALTHY + 1))
-      fi
-    fi
+        ;;
+      agent-dead|agent_dead)
+        HOOK_BEAD=$(rig_hook_bead "$RIG" "$PCAT_NAME")
+        if [ -n "$HOOK_BEAD" ] && bead_restartable "$SESSION_NAME" "$RIG" "$HOOK_BEAD"; then
+          STUCK+=("$SESSION_NAME|$RIG|$PCAT_NAME|$HOOK_BEAD|agent_dead")
+          log "  ZOMBIE: $SESSION_NAME (agent runtime dead, hook=$HOOK_BEAD)"
+        fi
+        ;;
+      agent-hung|agent_hung)
+        # A live runtime with quiet output can be a long research turn. Do not
+        # kill it here; operators can tune the threshold and inspect manually.
+        HEALTHY=$((HEALTHY + 1))
+        log "  OBSERVE: $SESSION_NAME runtime alive but inactive beyond $POLECAT_MAX_INACTIVITY; not restarting"
+        ;;
+      session-dead|session_dead)
+        HOOK_BEAD=$(rig_hook_bead "$RIG" "$PCAT_NAME")
+        if [ -n "$HOOK_BEAD" ] && bead_restartable "$SESSION_NAME" "$RIG" "$HOOK_BEAD"; then
+          CRASHED+=("$SESSION_NAME|$RIG|$PCAT_NAME|$HOOK_BEAD")
+          log "  CRASHED: $SESSION_NAME (hook=$HOOK_BEAD)"
+        fi
+        ;;
+      *)
+        log "  SKIP $SESSION_NAME: central liveness probe inconclusive"
+        ;;
+    esac
   done
 done <<< "$RIG_PREFIX_MAP"
 
@@ -205,7 +255,7 @@ else
     NOW=$(date +%s)
     HEARTBEAT_AGE=$(( NOW - ${HEARTBEAT_TIME:-0} ))
 
-    if [ "$HEARTBEAT_AGE" -gt 1200 ]; then
+    if [ "$HEARTBEAT_AGE" -gt "$DEACON_STALE_SECONDS" ]; then
       # Cross-check tmux activity before declaring stuck: heartbeat.json is
       # only ONE of three heartbeat stores (hq-qxl9). A live session with
       # recent activity means the file-write path diverged (e.g. a long
@@ -216,13 +266,13 @@ else
         ''|*[!0-9]*) ACTIVITY_AGE="" ;;
         *) ACTIVITY_AGE=$(( NOW - ACTIVITY_TIME )) ;;
       esac
-      if [ -n "$ACTIVITY_AGE" ] && [ "$ACTIVITY_AGE" -le 1200 ]; then
+      if [ -n "$ACTIVITY_AGE" ] && [ "$ACTIVITY_AGE" -le "$ACTIVITY_GRACE_SECONDS" ]; then
         log "  DIVERGENCE: heartbeat file stale (${HEARTBEAT_AGE}s) but session active ${ACTIVITY_AGE}s ago — write divergence, not stuck"
         DEACON_DIVERGENCE="heartbeat_write_divergence_${HEARTBEAT_AGE}s_active_${ACTIVITY_AGE}s"
       elif [ "$DEACON_PROCESS_ALIVE" -eq 1 ] && ! has_in_progress_work; then
         log "  SKIP: Deacon heartbeat stale (${HEARTBEAT_AGE}s old) but process is alive and no in_progress work exists"
       else
-        log "  STUCK: Deacon heartbeat stale (${HEARTBEAT_AGE}s old, >20m threshold), no recent session activity"
+        log "  STUCK: Deacon heartbeat stale (${HEARTBEAT_AGE}s old, >${DEACON_STALE_SECONDS}s threshold), no recent session activity"
         DEACON_ISSUE="stuck_heartbeat_${HEARTBEAT_AGE}s"
       fi
     else
@@ -234,7 +284,9 @@ fi
 # --- Mass death check ---------------------------------------------------------
 
 TOTAL_ISSUES=$(( ${#CRASHED[@]} + ${#STUCK[@]} ))
-if [ "$TOTAL_ISSUES" -ge 3 ]; then
+MASS_DEATH=0
+if [ "$TOTAL_ISSUES" -ge "$MASS_DEATH_THRESHOLD" ]; then
+  MASS_DEATH=1
   log ""
   log "MASS DEATH: $TOTAL_ISSUES agents down — escalating instead of restarting"
   gt escalate "Mass agent death: $TOTAL_ISSUES agents down" \
@@ -243,32 +295,36 @@ fi
 
 # --- Take action --------------------------------------------------------------
 
-# Crashed polecats: notify witness to restart
-# Note: `"${arr[@]:-}"` expands an empty array to a single empty string under
-# `set -u`, which would fire a phantom `RESTART_POLECAT: /` notification. The
-# `${arr[@]+"${arr[@]}"}` form expands to nothing when the array is empty.
-for ENTRY in ${CRASHED[@]+"${CRASHED[@]}"}; do
-  IFS='|' read -r SESSION RIG PCAT HOOK <<< "$ENTRY"
-  log "Requesting restart for $RIG/polecats/$PCAT (hook=$HOOK)"
-  gt mail send "$RIG/witness" -s "RESTART_POLECAT: $RIG/$PCAT" --stdin <<BODY
+if [ "$MASS_DEATH" -eq 1 ]; then
+  log "Skipping per-agent restart/kill actions during mass-death escalation"
+else
+  # Crashed polecats: notify witness to restart
+  # Note: `"${arr[@]:-}"` expands an empty array to a single empty string under
+  # `set -u`, which would fire a phantom `RESTART_POLECAT: /` notification. The
+  # `${arr[@]+"${arr[@]}"}` form expands to nothing when the array is empty.
+  for ENTRY in ${CRASHED[@]+"${CRASHED[@]}"}; do
+    IFS='|' read -r SESSION RIG PCAT HOOK <<< "$ENTRY"
+    log "Requesting restart for $RIG/polecats/$PCAT (hook=$HOOK)"
+    gt mail send "$RIG/witness" -s "RESTART_POLECAT: $RIG/$PCAT" --stdin <<BODY || log "  WARN: restart mail failed for $RIG/$PCAT"
 Polecat $PCAT crash confirmed by stuck-agent-dog plugin.
 hook_bead: $HOOK
 action: restart requested
 BODY
-done
+  done
 
-# Zombie polecats: kill zombie session, then request restart
-for ENTRY in ${STUCK[@]+"${STUCK[@]}"}; do
-  IFS='|' read -r SESSION RIG PCAT HOOK REASON <<< "$ENTRY"
-  log "Killing zombie session $SESSION and requesting restart"
-  tmux kill-session -t "$SESSION" 2>/dev/null || true
-  gt mail send "$RIG/witness" -s "RESTART_POLECAT: $RIG/$PCAT (zombie cleared)" --stdin <<BODY
+  # Zombie polecats: kill zombie session, then request restart
+  for ENTRY in ${STUCK[@]+"${STUCK[@]}"}; do
+    IFS='|' read -r SESSION RIG PCAT HOOK REASON <<< "$ENTRY"
+    log "Killing zombie session $SESSION and requesting restart"
+    tmux kill-session -t "$SESSION" 2>/dev/null || true
+    gt mail send "$RIG/witness" -s "RESTART_POLECAT: $RIG/$PCAT (zombie cleared)" --stdin <<BODY || log "  WARN: restart mail failed for $RIG/$PCAT"
 Polecat $PCAT zombie session cleared by stuck-agent-dog plugin.
 hook_bead: $HOOK
 reason: $REASON
 action: restart requested
 BODY
-done
+  done
+fi
 
 # Deacon issues: escalate
 if [ -n "$DEACON_ISSUE" ]; then

@@ -197,12 +197,28 @@ func runSlingFormula(ctx context.Context, args []string) error {
 		return fmt.Errorf("serializing formula sling for %s: %w", targetAgent, assigneeLockErr)
 	}
 	defer assigneeUnlock()
+	mode := ""
+	if slingRalph {
+		mode = "ralph"
+	}
 
 	existing, err := findHookedFormulaSingletonFn(formulaWorkDir, targetAgent, formulaName)
 	if err != nil {
 		return fmt.Errorf("checking existing hooked formulas for %s: %w", targetAgent, err)
 	}
 	if existing != nil && !slingForce {
+		existingMode := ""
+		if fields := beads.ParseAttachmentFields(existing); fields != nil {
+			existingMode = fields.Mode
+		}
+		if existingMode != mode {
+			if err := storeFieldsInBead(existing.ID, beadFieldUpdates{Mode: &mode}); err != nil {
+				return fmt.Errorf("updating existing formula mode: %w", err)
+			}
+			if mode != "" || existingMode != "" {
+				updateAgentMode(targetAgent, mode, "", townBeadsDir)
+			}
+		}
 		fmt.Printf("%s Formula %s already hooked to %s via %s, no-op\n",
 			style.Dim.Render("○"), formulaName, targetAgent, existing.ID)
 		return nil
@@ -287,12 +303,16 @@ func runSlingFormula(ctx context.Context, args []string) error {
 		Args:            slingArgs,
 		Vars:            append([]string(nil), slingVars...),
 		AttachedFormula: formulaName,
+		Mode:            &mode,
 		FormulaVars:     strings.Join(slingVars, "\n"),
 	}
 	if err := storeFieldsInBead(wispRootID, fieldUpdates); err != nil {
 		fmt.Printf("%s Could not store fields in bead: %v\n", style.Dim.Render("Warning:"), err)
 	} else if slingArgs != "" {
 		fmt.Printf("%s Args stored in bead (durable)\n", style.Bold.Render("✓"))
+	}
+	if mode != "" {
+		updateAgentMode(targetAgent, mode, "", townBeadsDir)
 	}
 
 	// Start delayed dog session now that hook is set

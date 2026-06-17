@@ -320,6 +320,22 @@ func TestAttachmentFormulaVarsPrefersAttachedVars(t *testing.T) {
 	}
 }
 
+func TestAttachmentFormulaVarsRoundTripsPersistedVars(t *testing.T) {
+	t.Parallel()
+
+	desc := beads.SetAttachmentFields(&beads.Issue{Description: "Body"}, &beads.AttachmentFields{
+		AttachedFormula: "mol-polecat-work",
+		AttachedVars:    []string{"feature=Attached Feature"},
+		FormulaVars:     "feature=Persisted Feature\nissue=gt-123\nbase_branch=main",
+	})
+	attachment := beads.ParseAttachmentFields(&beads.Issue{Description: desc})
+	got := attachmentFormulaVars(attachment)
+	want := []string{"feature=Attached Feature", "issue=gt-123", "base_branch=main"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("attachmentFormulaVars() = %#v, want %#v\nDescription:\n%s", got, want, desc)
+	}
+}
+
 func TestApplyFormulaVarsUsesWorkflowBareSyntax(t *testing.T) {
 	t.Parallel()
 

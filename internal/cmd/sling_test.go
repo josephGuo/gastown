@@ -1584,15 +1584,18 @@ exit /b 0
 	prevVars := slingVars
 	prevDryRun := slingDryRun
 	prevNoBoot := slingNoBoot
+	prevRalph := slingRalph
 	t.Cleanup(func() {
 		slingVars = prevVars
 		slingDryRun = prevDryRun
 		slingNoBoot = prevNoBoot
+		slingRalph = prevRalph
 	})
 
 	slingVars = []string{"version=1.2.3", "channel=stable"}
 	slingDryRun = false
 	slingNoBoot = true
+	slingRalph = true
 
 	if err := runSlingFormula(context.Background(), []string{"mol-anything"}); err != nil {
 		t.Fatalf("runSlingFormula: %v", err)
@@ -1609,6 +1612,9 @@ exit /b 0
 	}
 	if !strings.Contains(attachment, "version=1.2.3") || !strings.Contains(attachment, "channel=stable") {
 		t.Fatalf("formula vars missing from persisted description:\n%s", attachment)
+	}
+	if !strings.Contains(attachment, "mode: ralph") {
+		t.Fatalf("ralph mode missing from persisted standalone formula description:\n%s", attachment)
 	}
 }
 
@@ -1699,6 +1705,81 @@ exit /b 0
 
 	if strings.Contains(log, "cook ") || strings.Contains(log, "mol wisp") || strings.Contains(log, "update ") {
 		t.Fatalf("expected same-formula sling to no-op before creating a new wisp, got:\n%s", log)
+	}
+}
+
+func TestRunSlingFormulaUpdatesModeWhenSameFormulaAlreadyHooked(t *testing.T) {
+	townRoot := t.TempDir()
+
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0755); err != nil {
+		t.Fatalf("mkdir mayor/rig: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+
+	binDir := filepath.Join(townRoot, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatalf("mkdir binDir: %v", err)
+	}
+	bdScript := `#!/bin/sh
+exit 0
+`
+	bdScriptWindows := `@echo off
+exit /b 0
+`
+	_ = writeBDStub(t, binDir, bdScript, bdScriptWindows)
+
+	attachedLogPath := filepath.Join(townRoot, "attached-molecule.log")
+	t.Setenv("GT_TEST_ATTACHED_MOLECULE_LOG", attachedLogPath)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv(EnvGTRole, "mayor")
+	t.Setenv("GT_POLECAT", "")
+	t.Setenv("GT_CREW", "")
+	t.Setenv("TMUX_PANE", "")
+	t.Setenv("GT_TEST_NO_NUDGE", "1")
+	t.Setenv("GT_TEST_SKIP_HOOK_VERIFY", "1")
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+	if err := os.Chdir(filepath.Join(townRoot, "mayor", "rig")); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	prevDryRun := slingDryRun
+	prevNoBoot := slingNoBoot
+	prevForce := slingForce
+	prevRalph := slingRalph
+	prevFindSingleton := findHookedFormulaSingletonFn
+	t.Cleanup(func() {
+		slingDryRun = prevDryRun
+		slingNoBoot = prevNoBoot
+		slingForce = prevForce
+		slingRalph = prevRalph
+		findHookedFormulaSingletonFn = prevFindSingleton
+	})
+
+	slingDryRun = false
+	slingNoBoot = true
+	slingForce = false
+	slingRalph = false
+	findHookedFormulaSingletonFn = func(workDir, targetAgent, formulaName string) (*beads.Issue, error) {
+		return &beads.Issue{ID: "gt-wisp-existing", Description: "attached_formula: mol-anything\nmode: ralph"}, nil
+	}
+
+	if err := runSlingFormula(context.Background(), []string{"mol-anything"}); err != nil {
+		t.Fatalf("runSlingFormula: %v", err)
+	}
+
+	attachmentBytes, err := os.ReadFile(attachedLogPath)
+	if err != nil {
+		t.Fatalf("read attachment log: %v", err)
+	}
+	if strings.Contains(string(attachmentBytes), "mode: ralph") {
+		t.Fatalf("same-formula normal sling should clear stale ralph mode, got:\n%s", string(attachmentBytes))
 	}
 }
 
@@ -2384,6 +2465,25 @@ exit /b 0
 			"This is required for gt hook to recognize the molecule attachment.\n"+
 			"Log output:\n%s\nAttached log:\n%s", string(logBytes), attachedLog)
 	}
+
+	descBytes, err := os.ReadFile(attachedLogPath)
+	if err != nil {
+		t.Fatalf("read attached log: %v", err)
+	}
+	attachment := beads.ParseAttachmentFields(&beads.Issue{Description: string(descBytes)})
+	if attachment == nil {
+		t.Fatalf("parse attached fields returned nil:\n%s", string(descBytes))
+	}
+	vars := map[string]string{}
+	for _, kv := range attachmentFormulaVars(attachment) {
+		key, value, ok := strings.Cut(kv, "=")
+		if ok {
+			vars[key] = value
+		}
+	}
+	if vars["feature"] != "Bug to fix" || vars["issue"] != "gt-abc123" {
+		t.Fatalf("formula vars did not roundtrip through attached bead description: %#v\nDescription:\n%s", vars, string(descBytes))
+	}
 }
 
 // TestSlingNoMergeFlag verifies that gt sling --no-merge stores the no_merge flag
@@ -2483,6 +2583,91 @@ exit /b 0
 	molContent := string(molBytes)
 	if !strings.Contains(molContent, "no_merge: true") {
 		t.Errorf("--no-merge flag not stored in bead description\nDescription:\n%s", molContent)
+	}
+}
+
+func TestSlingRalphFlagStoresMode(t *testing.T) {
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", "rig"), 0755); err != nil {
+		t.Fatalf("mkdir mayor/rig: %v", err)
+	}
+
+	binDir := filepath.Join(townRoot, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatalf("mkdir binDir: %v", err)
+	}
+	logPath := filepath.Join(townRoot, "bd.log")
+	bdScript := `#!/bin/sh
+set -e
+echo "ARGS:$*" >> "${BD_LOG}"
+cmd="$1"
+shift || true
+case "$cmd" in
+  show)
+    echo '[{"title":"Test issue","status":"open","assignee":"","description":""}]'
+    ;;
+  update)
+    exit 0
+    ;;
+esac
+exit 0
+`
+	bdScriptWindows := `@echo off
+setlocal enableextensions
+echo ARGS:%*>>"%BD_LOG%"
+set "cmd=%1"
+if not "%cmd%"=="show" goto :notshow
+echo [{"title":"Test issue","status":"open","assignee":"","description":""}]
+exit /b 0
+:notshow
+if "%cmd%"=="update" exit /b 0
+exit /b 0
+`
+	_ = writeBDStub(t, binDir, bdScript, bdScriptWindows)
+
+	molLogPath := filepath.Join(townRoot, "mol.log")
+	t.Setenv("GT_TEST_ATTACHED_MOLECULE_LOG", molLogPath)
+	t.Setenv("BD_LOG", logPath)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv(EnvGTRole, "mayor")
+	t.Setenv("GT_CREW", "")
+	t.Setenv("GT_POLECAT", "")
+	t.Setenv("TMUX_PANE", "")
+	t.Setenv("GT_TEST_NO_NUDGE", "1")
+	t.Setenv("GT_TEST_SKIP_HOOK_VERIFY", "1")
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+	if err := os.Chdir(filepath.Join(townRoot, "mayor", "rig")); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	prevDryRun := slingDryRun
+	prevNoConvoy := slingNoConvoy
+	prevRalph := slingRalph
+	t.Cleanup(func() {
+		slingDryRun = prevDryRun
+		slingNoConvoy = prevNoConvoy
+		slingRalph = prevRalph
+	})
+	slingDryRun = false
+	slingNoConvoy = true
+	slingRalph = true
+
+	if err := runSling(nil, []string{"gt-test123"}); err != nil {
+		t.Fatalf("runSling: %v", err)
+	}
+
+	molBytes, err := os.ReadFile(molLogPath)
+	if err != nil {
+		t.Fatalf("read molecule log: %v", err)
+	}
+	molContent := string(molBytes)
+	if !strings.Contains(molContent, "mode: ralph") {
+		t.Fatalf("--ralph flag not stored in bead description\nDescription:\n%s", molContent)
 	}
 }
 
@@ -2766,6 +2951,7 @@ func TestBuildSlingFieldUpdatesIncludesConvoyFields(t *testing.T) {
 		"mol-polecat-work",
 		false,
 		false,
+		"ralph",
 		"feature=test",
 		"hq-cv-test1",
 		"local",
@@ -2780,6 +2966,9 @@ func TestBuildSlingFieldUpdatesIncludesConvoyFields(t *testing.T) {
 	}
 	if !got.ConvoyOwned {
 		t.Fatal("ConvoyOwned = false, want true")
+	}
+	if got.Mode == nil || *got.Mode != "ralph" {
+		t.Fatalf("Mode = %v, want ralph", got.Mode)
 	}
 }
 
@@ -2808,6 +2997,26 @@ func TestStoreFieldsInBeadConvoyFields(t *testing.T) {
 	}
 	if !strings.Contains(text, "convoy_owned: true") {
 		t.Fatalf("missing convoy_owned in description:\n%s", text)
+	}
+}
+
+func TestBeadFieldModeUpdateCanClearStaleRalphMode(t *testing.T) {
+	issue := &beads.Issue{Description: "attached_formula: mol-polecat-work\nmode: ralph"}
+	fields := beads.ParseAttachmentFields(issue)
+	if fields == nil {
+		t.Fatal("expected attachment fields")
+	}
+	mode := ""
+	updates := beadFieldUpdates{Mode: &mode}
+	if updates.Mode != nil {
+		fields.Mode = *updates.Mode
+	}
+	desc := beads.SetAttachmentFields(issue, fields)
+	if strings.Contains(desc, "mode: ralph") || strings.Contains(desc, "mode:") {
+		t.Fatalf("expected stale ralph mode to be cleared, got:\n%s", desc)
+	}
+	if !strings.Contains(desc, "attached_formula: mol-polecat-work") {
+		t.Fatalf("expected unrelated attachment fields preserved, got:\n%s", desc)
 	}
 }
 
