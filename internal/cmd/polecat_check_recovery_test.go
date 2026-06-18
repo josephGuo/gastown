@@ -305,8 +305,26 @@ func TestStaleCleanupStatusCanBeIgnoredForRecovery(t *testing.T) {
 			activeMRSafe: true,
 		},
 		{
-			name:         "non-unpushed cleanup still blocks",
+			name:         "closed source with clean git ignores stale stash cleanup",
 			status:       polecat.CleanupStash,
+			workTerminal: true,
+			hookSafe:     true,
+			activeMRSafe: true,
+			gitSafe:      true,
+			wantCanSkip:  true,
+		},
+		{
+			name:         "closed source with clean git ignores stale uncommitted cleanup",
+			status:       polecat.CleanupUncommitted,
+			workTerminal: true,
+			hookSafe:     true,
+			activeMRSafe: true,
+			gitSafe:      true,
+			wantCanSkip:  true,
+		},
+		{
+			name:         "unknown cleanup still blocks",
+			status:       polecat.CleanupUnknown,
 			workTerminal: true,
 			hookSafe:     true,
 			activeMRSafe: true,
@@ -325,35 +343,39 @@ func TestStaleCleanupStatusCanBeIgnoredForRecovery(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := staleCleanupStatusCanBeIgnoredForRecovery(tt.status, tt.workTerminal, tt.hookSafe, tt.activeMRSafe, tt.gitSafe)
+			got := polecat.CanIgnoreStaleCleanupStatus(tt.status, tt.workTerminal, tt.hookSafe, tt.activeMRSafe, tt.gitSafe)
 			if got != tt.wantCanSkip {
-				t.Fatalf("staleCleanupStatusCanBeIgnoredForRecovery() = %v, want %v", got, tt.wantCanSkip)
+				t.Fatalf("CanIgnoreStaleCleanupStatus() = %v, want %v", got, tt.wantCanSkip)
 			}
 		})
 	}
 }
 
 func TestReconcileCleanupStatusIfSafe(t *testing.T) {
-	status := &RecoveryStatus{
-		CleanupStatus: polecat.CleanupUnpushed,
-		Verdict:       "SAFE_TO_NUKE",
-		Branch:        "polecat/nitro",
-		MQStatus:      "submitted",
-	}
-	updater := &fakeCleanupUpdater{}
-	reconcileCleanupStatusIfSafe(status, updater, "gt-gastown-polecat-nitro", &polecat.Polecat{State: polecat.StateIdle}, &beads.AgentFields{
-		AgentState:    string(beads.AgentStateIdle),
-		CleanupStatus: string(polecat.CleanupUnpushed),
-	})
+	for _, previous := range []polecat.CleanupStatus{polecat.CleanupUnpushed, polecat.CleanupStash, polecat.CleanupUncommitted} {
+		t.Run(string(previous), func(t *testing.T) {
+			status := &RecoveryStatus{
+				CleanupStatus: previous,
+				Verdict:       "SAFE_TO_NUKE",
+				Branch:        "polecat/nitro",
+				MQStatus:      "submitted",
+			}
+			updater := &fakeCleanupUpdater{}
+			reconcileCleanupStatusIfSafe(status, updater, "gt-gastown-polecat-nitro", &polecat.Polecat{State: polecat.StateIdle}, &beads.AgentFields{
+				AgentState:    string(beads.AgentStateIdle),
+				CleanupStatus: string(previous),
+			})
 
-	if updater.calls != 1 {
-		t.Fatalf("UpdateAgentCleanupStatus calls = %d, want 1", updater.calls)
-	}
-	if updater.id != "gt-gastown-polecat-nitro" || updater.status != string(polecat.CleanupClean) {
-		t.Fatalf("update = (%q, %q), want clean update for agent", updater.id, updater.status)
-	}
-	if status.CleanupStatus != polecat.CleanupClean || !status.Reconciled {
-		t.Fatalf("status after reconcile = (%q, reconciled=%v), want clean true", status.CleanupStatus, status.Reconciled)
+			if updater.calls != 1 {
+				t.Fatalf("UpdateAgentCleanupStatus calls = %d, want 1", updater.calls)
+			}
+			if updater.id != "gt-gastown-polecat-nitro" || updater.status != string(polecat.CleanupClean) {
+				t.Fatalf("update = (%q, %q), want clean update for agent", updater.id, updater.status)
+			}
+			if status.CleanupStatus != polecat.CleanupClean || !status.Reconciled {
+				t.Fatalf("status after reconcile = (%q, reconciled=%v), want clean true", status.CleanupStatus, status.Reconciled)
+			}
+		})
 	}
 }
 
@@ -518,6 +540,16 @@ func TestRecoveryGitStateBlocker(t *testing.T) {
 				t.Errorf("recoveryGitStateBlocker() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRecoveryActionsForBlockers(t *testing.T) {
+	actions := recoveryActionsForBlockers([]string{"git_state=has_stash stash_count=1"})
+	if len(actions) != 1 || !strings.Contains(actions[0], "preserve branch-owned stash") {
+		t.Fatalf("actions = %v, want branch stash preservation action", actions)
+	}
+	if actions := recoveryActionsForBlockers([]string{"cleanup_status=has_stash"}); len(actions) != 0 {
+		t.Fatalf("stale cleanup-only blocker actions = %v, want none", actions)
 	}
 }
 

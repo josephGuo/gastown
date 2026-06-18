@@ -2,6 +2,7 @@ package witness
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -752,6 +753,103 @@ var slotOpenRecoveryCheck = func(workDir, rigName, polecatName string) (string, 
 	return util.ExecWithOutput(workDir, "gt", "polecat", "check-recovery", rigName+"/"+polecatName, "--json", "--reconcile-cleanup")
 }
 
+type slotOpenSchedulerStatus struct {
+	Paused      bool `json:"paused"`
+	QueuedReady int  `json:"queued_ready"`
+	Capacity    struct {
+		Max  int `json:"max"`
+		Free int `json:"free"`
+	} `json:"capacity"`
+}
+
+type slotOpenSchedulerResult struct {
+	Before     slotOpenSchedulerStatus
+	After      slotOpenSchedulerStatus
+	Ran        bool
+	Dispatched int
+	Output     string
+}
+
+var runSchedulerForSlotOpen = defaultRunSchedulerForSlotOpen
+var slotOpenDecisionForNotify = slotOpenDecision
+
+func defaultRunSchedulerForSlotOpen(townRoot string) (slotOpenSchedulerResult, error) {
+	var result slotOpenSchedulerResult
+
+	before, err := readSchedulerStatusForSlotOpen(townRoot)
+	if err != nil {
+		return result, err
+	}
+	result.Before = before
+
+	if before.Paused || before.Capacity.Max <= 0 || before.Capacity.Free <= 0 || before.QueuedReady == 0 {
+		return result, nil
+	}
+
+	output, err := runGTForSlotOpen(townRoot, "scheduler", "run")
+	result.Ran = true
+	result.Output = output
+	if err != nil {
+		return result, err
+	}
+	result.Dispatched = parseSchedulerRunDispatched(output)
+
+	after, err := readSchedulerStatusForSlotOpen(townRoot)
+	if err != nil {
+		return result, err
+	}
+	result.After = after
+	return result, nil
+}
+
+func parseSchedulerRunDispatched(output string) int {
+	fields := strings.Fields(output)
+	for i, field := range fields {
+		if field != "Dispatched" || i+1 >= len(fields) {
+			continue
+		}
+		n, err := strconv.Atoi(strings.TrimRight(fields[i+1], ","))
+		if err == nil {
+			return n
+		}
+	}
+	return 0
+}
+
+func readSchedulerStatusForSlotOpen(townRoot string) (slotOpenSchedulerStatus, error) {
+	var status slotOpenSchedulerStatus
+	output, err := runGTForSlotOpen(townRoot, "scheduler", "status", "--json")
+	if err != nil {
+		return status, err
+	}
+	jsonOutput := strings.TrimSpace(output)
+	if idx := strings.Index(jsonOutput, "{"); idx > 0 {
+		jsonOutput = jsonOutput[idx:]
+	}
+	if err := json.Unmarshal([]byte(jsonOutput), &status); err != nil {
+		return status, fmt.Errorf("parse scheduler status: %w", err)
+	}
+	return status, nil
+}
+
+func runGTForSlotOpen(townRoot string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "gt", args...)
+	cmd.Dir = townRoot
+	cmd.Env = append(beads.BuildMutationRoutingBDEnv(os.Environ(), filepath.Join(townRoot, ".beads")), "GT_DAEMON=1")
+	out, err := cmd.CombinedOutput()
+	output := string(out)
+	if ctx.Err() == context.DeadlineExceeded {
+		return output, fmt.Errorf("gt %s timed out after 5m", strings.Join(args, " "))
+	}
+	if err != nil {
+		return output, fmt.Errorf("gt %s failed: %w (output: %s)", strings.Join(args, " "), err, strings.TrimSpace(output))
+	}
+	return output, nil
+}
+
 func shouldNotifyMayorSlotOpen(workDir, rigName, polecatName string) (bool, string) {
 	output, err := slotOpenRecoveryCheck(workDir, rigName, polecatName)
 	if err != nil {
@@ -790,7 +888,7 @@ func notifyMayorSlotOpen(workDir, rigName, polecatName, exitType string) {
 		return
 	}
 	if exitType != string(ExitTypeCompleted) {
-		decision := slotOpenDecision(workDir, townRoot, rigName, polecatName, exitType)
+		decision := slotOpenDecisionForNotify(workDir, townRoot, rigName, polecatName, exitType)
 		if !decision.Reusable {
 			_, _ = channelevents.EmitToTown(townRoot, "mayor", "SLOT_BLOCKED", []string{
 				"source=witness",
@@ -806,7 +904,7 @@ func notifyMayorSlotOpen(workDir, rigName, polecatName, exitType string) {
 		fmt.Fprintf(os.Stderr, "witness: suppressing SLOT_OPEN for %s/%s: %s\n", rigName, polecatName, reason)
 		return
 	}
-	decision := slotOpenDecision(workDir, townRoot, rigName, polecatName, exitType)
+	decision := slotOpenDecisionForNotify(workDir, townRoot, rigName, polecatName, exitType)
 	if !decision.Reusable {
 		_, _ = channelevents.EmitToTown(townRoot, "mayor", "SLOT_BLOCKED", []string{
 			"source=witness",
@@ -815,6 +913,22 @@ func notifyMayorSlotOpen(workDir, rigName, polecatName, exitType string) {
 			"exit=" + exitType,
 			"reason=" + decision.Reason,
 		})
+		return
+	}
+	if result, err := runSchedulerForSlotOpen(townRoot); err != nil {
+		fmt.Fprintf(os.Stderr, "witness: SLOT_OPEN scheduler trigger failed for %s/%s: %v\n", rigName, polecatName, err)
+		if result.Dispatched > 0 {
+			return
+		}
+	} else if result.Dispatched > 0 {
+		if status, ok := schedulerOpenAfterSlot(result); ok {
+			notifyMayorSchedulerOpen(townRoot, rigName, polecatName, exitType, status)
+		}
+		return
+	} else if status, ok := schedulerOpenAfterSlot(result); ok {
+		notifyMayorSchedulerOpen(townRoot, rigName, polecatName, exitType, status)
+		return
+	} else if status := schedulerStatusAfterSlot(result); status.Capacity.Max > 0 && (status.Paused || status.Capacity.Free <= 0) {
 		return
 	}
 
@@ -845,6 +959,44 @@ func notifyMayorSlotOpen(workDir, rigName, polecatName, exitType string) {
 	_ = cmd.Run()
 }
 
+func schedulerOpenAfterSlot(result slotOpenSchedulerResult) (slotOpenSchedulerStatus, bool) {
+	status := schedulerStatusAfterSlot(result)
+	return status, !status.Paused && status.Capacity.Max > 0 && status.Capacity.Free > 0 && status.QueuedReady == 0
+}
+
+func schedulerStatusAfterSlot(result slotOpenSchedulerResult) slotOpenSchedulerStatus {
+	status := result.Before
+	if result.Ran {
+		status = result.After
+	}
+	return status
+}
+
+func notifyMayorSchedulerOpen(townRoot, rigName, polecatName, exitType string, status slotOpenSchedulerStatus) {
+	_, _ = channelevents.EmitToTown(townRoot, "mayor", "SCHEDULER_OPEN", []string{
+		"source=witness",
+		"rig=" + rigName,
+		"polecat=" + polecatName,
+		"exit=" + exitType,
+		"capacity_free=" + strconv.Itoa(status.Capacity.Free),
+		"queued_ready=" + strconv.Itoa(status.QueuedReady),
+	})
+
+	mayorSession := session.MayorSessionName()
+	t := tmux.NewTmux()
+	msg := fmt.Sprintf("SCHEDULER_OPEN: %s/%s completed (exit=%s); scheduler has capacity but no eligible queued beads remain.", rigName, polecatName, exitType)
+	if running, err := t.HasSession(mayorSession); err == nil && running {
+		if err := t.NudgeSession(mayorSession, msg); err == nil {
+			return
+		}
+	}
+
+	subject := fmt.Sprintf("SCHEDULER_OPEN: %s/%s completed (exit=%s)", rigName, polecatName, exitType)
+	cmd := exec.Command("gt", "mail", "send", "mayor/", "-s", subject, "-m", msg)
+	cmd.Dir = townRoot
+	_ = cmd.Run()
+}
+
 func slotOpenDecision(workDir, townRoot, rigName, polecatName, exitType string) polecat.SlotReuseDecision {
 	if exitType != string(ExitTypeCompleted) {
 		return polecat.SlotReuseDecision{Reason: "exit-" + strings.ToLower(exitType)}
@@ -855,9 +1007,20 @@ func slotOpenDecision(workDir, townRoot, rigName, polecatName, exitType string) 
 	_, fields, err := rigBeads.ForAgentBead().GetAgentBead(agentID)
 	input := polecat.SlotReuseInput{State: polecat.StateIdle, CleanupStatus: polecat.CleanupUnknown, GitCheckFailed: err != nil || fields == nil}
 	issueID := ""
+	hookSafe := true
+	hookTerminal := false
 	if fields != nil {
-		issueID = fields.HookBead
-		input.HookBead = fields.HookBead
+		issueID = fields.LastSourceIssue
+		if issueID == "" {
+			issueID = fields.HookBead
+		}
+		if fields.HookBead != "" {
+			hookTerminal = witnessIssueTerminal(rigBeads, fields.HookBead)
+			hookSafe = hookTerminal
+			if !hookSafe {
+				input.HookBead = fields.HookBead
+			}
+		}
 		input.PushFailed = fields.PushFailed
 		input.MRFailed = fields.MRFailed
 		input.ActiveMR = fields.ActiveMR
@@ -885,8 +1048,10 @@ func slotOpenDecision(workDir, townRoot, rigName, polecatName, exitType string) 
 	} else {
 		input.GitCheckFailed = true
 	}
+	gitSafe := !input.GitCheckFailed && !input.GitDirty && input.StashCount == 0 && input.UnpushedCommits == 0
+	activeMRSafe := true
+	sourceTerminal := fields != nil && issueID != "" && witnessIssueTerminal(rigBeads, issueID)
 	if fields != nil && fields.ActiveMR != "" {
-		gitSafe := !input.GitCheckFailed && !input.GitDirty && input.StashCount == 0 && input.UnpushedCommits == 0
 		sourceHint := fields.LastSourceIssue
 		if sourceHint == "" {
 			sourceHint = fields.HookBead
@@ -894,13 +1059,18 @@ func slotOpenDecision(workDir, townRoot, rigName, polecatName, exitType string) 
 		assessment := polecat.AssessActiveMR(beads.New(beads.ResolveBeadsDir(workDir)), polecat.ActiveMRInput{ActiveMR: fields.ActiveMR, SourceIssueHint: sourceHint, RequireGitSafe: true, GitSafe: gitSafe})
 		if assessment.Pending {
 			input.ActiveMRBlocker = assessment.Reason
-		} else if input.CleanupStatus == polecat.CleanupUnpushed {
-			input.IgnoreCleanupStatus = true
+		}
+		activeMRSafe = !assessment.Pending
+		if assessment.SourceTerminal {
+			sourceTerminal = true
 		}
 	}
 	input.MQCheckRequired = input.Branch != ""
 	input.HasSubmittableWork = witnessHasSubmittableWork(clonePath)
 	input.AssignedBeadTerminal = witnessIssueTerminal(rigBeads, issueID)
+	if polecat.CanIgnoreStaleCleanupStatus(input.CleanupStatus, input.AssignedBeadTerminal || sourceTerminal || hookTerminal, hookSafe, activeMRSafe, gitSafe) {
+		input.IgnoreCleanupStatus = true
+	}
 	input.MQNotRequired = witnessMQNotRequiredSource(rigBeads, issueID)
 	if input.MQCheckRequired && input.HasSubmittableWork && !input.AssignedBeadTerminal && !input.MQNotRequired {
 		mr, err := rigBeads.FindMRForBranchAny(input.Branch)

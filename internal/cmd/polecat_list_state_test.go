@@ -226,6 +226,19 @@ func TestWorkstateDispositionProjectionAgreement(t *testing.T) {
 			wantCapacity: polecatCapacitySnapshot{RecoveryBlocked: 1},
 		},
 		{
+			name:         "stale stash cleanup ignored is reusable capacity",
+			in:           polecat.WorkstateInput{State: polecat.StateIdle, CleanupStatus: polecat.CleanupStash, IgnoreCleanupStatus: true},
+			wantReusable: true,
+			wantSafe:     true,
+			wantCapacity: polecatCapacitySnapshot{ReusableIdle: 1},
+		},
+		{
+			name:         "live branch stash remains recovery blocked",
+			in:           polecat.WorkstateInput{State: polecat.StateIdle, CleanupStatus: polecat.CleanupClean, StashCount: 1},
+			wantRecovery: true,
+			wantCapacity: polecatCapacitySnapshot{RecoveryBlocked: 1},
+		},
+		{
 			name:         "needs mq submit",
 			in:           polecat.WorkstateInput{State: polecat.StateIdle, CleanupStatus: polecat.CleanupClean, Branch: "polecat/test", MQCheckRequired: true, HasSubmittableWork: true},
 			wantRecovery: true,

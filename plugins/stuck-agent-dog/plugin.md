@@ -356,16 +356,15 @@ echo "=== $SUMMARY ==="
 
 On success (no issues or issues handled):
 ```bash
-bd create "stuck-agent-dog: $SUMMARY" -t chore --ephemeral \
-  -l type:plugin-run,plugin:stuck-agent-dog,result:success \
-  -d "$SUMMARY" --silent 2>/dev/null || true
+gt plugin record-run --plugin stuck-agent-dog --result success \
+  --title "stuck-agent-dog: $SUMMARY" --description "$SUMMARY" >/dev/null 2>&1 || true
 ```
 
 On failure:
 ```bash
-bd create "stuck-agent-dog: FAILED" -t chore --ephemeral \
-  -l type:plugin-run,plugin:stuck-agent-dog,result:failure \
-  -d "Agent health check failed: $ERROR" --silent 2>/dev/null || true
+gt plugin record-run --plugin stuck-agent-dog --result failure \
+  --title "stuck-agent-dog: FAILED" \
+  --description "Agent health check failed: $ERROR" >/dev/null 2>&1 || true
 
 gt escalate "Plugin FAILED: stuck-agent-dog" \
   --severity high \

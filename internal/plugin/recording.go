@@ -22,10 +22,12 @@ const (
 
 // PluginRunRecord represents data for creating a plugin run bead.
 type PluginRunRecord struct {
-	PluginName string
-	RigName    string
-	Result     RunResult
-	Body       string
+	PluginName  string
+	RigName     string
+	Result      RunResult
+	Title       string
+	Body        string
+	ExtraLabels []string
 }
 
 // PluginRunBead represents a recorded plugin run from the ledger.
@@ -50,7 +52,10 @@ func NewRecorder(townRoot string) *Recorder {
 // RecordRun creates an ephemeral bead for a plugin run.
 // This is pure data writing - the caller decides what result to record.
 func (r *Recorder) RecordRun(record PluginRunRecord) (string, error) {
-	title := fmt.Sprintf("Plugin run: %s", record.PluginName)
+	title := record.Title
+	if title == "" {
+		title = fmt.Sprintf("Plugin run: %s", record.PluginName)
+	}
 
 	// Build labels
 	labels := []string{
@@ -61,12 +66,14 @@ func (r *Recorder) RecordRun(record PluginRunRecord) (string, error) {
 	if record.RigName != "" {
 		labels = append(labels, fmt.Sprintf("rig:%s", record.RigName))
 	}
+	labels = append(labels, record.ExtraLabels...)
 
 	// Build bd create command
 	args := []string{
 		"create",
 		"--ephemeral",
 		"--json",
+		"-t", "chore",
 		"--title=" + title,
 	}
 	for _, label := range labels {

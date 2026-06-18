@@ -67,7 +67,7 @@ EXAMPLES:
     --backoff-base 30s --backoff-mult 2 --backoff-max 15m
 
   # On timeout, the agent bead's idle:N label is auto-incremented
-  # On signal, caller should reset: gt agent state gt-gastown-witness --set idle=0
+  # On signal, caller should reset: gt agents state gt-gastown-witness --set idle=0
 
   # Quiet mode (no output, for scripting)
   gt mol await-signal --timeout 30s --quiet`,
@@ -320,7 +320,9 @@ func runMoleculeAwaitSignal(cmd *cobra.Command, args []string) error {
 
 // calculateEffectiveTimeout determines the timeout based on flags.
 // If backoff parameters are provided, uses exponential backoff formula:
-//   min(base * multiplier^idleCycles, max)
+//
+//	min(base * multiplier^idleCycles, max)
+//
 // Otherwise uses the simple --timeout value.
 func calculateEffectiveTimeout(idleCycles int) (time.Duration, error) {
 	// If backoff base is set, use backoff mode

@@ -107,7 +107,7 @@ When `await-event` outputs `EFFORT: full`, run all steps thoroughly (normal mode
 
 The goal: idle cycles should burn ~10% of the tokens a full patrol uses."""
 formula = "mol-refinery-patrol"
-version = 14
+version = 15
 
 [vars]
 [vars.wisp_type]
@@ -473,10 +473,10 @@ Record the quality review result. This is fail-open: if the command fails,
 log the error and continue — never block the merge.
 
 ```bash
-bd create "quality-review: Score <score>, <recommendation>" -t chore --ephemeral \\
-  -l type:plugin-run,plugin:quality-review-result,worker:<polecat-name>,rig:<rig-name>,score:<score>,recommendation:<approve|request_changes>,result:success \\
-  -d "Score: <score>, <recommendation>. Issues: <count> (<summary>)" \\
-  --silent 2>/dev/null || true
+gt plugin record-run --plugin quality-review-result --result success --rig <rig-name> \\
+  --label worker:<polecat-name> --label score:<score> --label recommendation:<approve|request_changes> \\
+  --title "quality-review: Score <score>, <recommendation>" \\
+  --description "Score: <score>, <recommendation>. Issues: <count> (<summary>)" >/dev/null 2>&1 || true
 ```
 
 **Step 6: Handle breach scores (measurement-only)**
@@ -1121,16 +1121,16 @@ End of patrol cycle decision. Use the signals from context-check to decide.
 
 **If you decide to continue patrolling:**
 
-Resolve your agent bead ID for this patrol cycle. You MUST replace `<YOUR_RIG>` below with your actual rig name (e.g., `beads`, `town`) before running:
+Resolve your agent bead ID for this patrol cycle:
 ```bash
-bd list --label=gt:agent --desc-contains="role_type: refinery" --json | jq -r '.[] | select(.status != "closed") | select(.description | test("(?m)^\\\\s*rig: <YOUR_RIG>\\\\s*$")) | .id'
+YOUR_AGENT_BEAD=$(gt agents resolve --role refinery --rig {{rig}})
 ```
-This must return exactly one bead ID. If it returns zero results, STOP and report an error — verify you substituted `<YOUR_RIG>` correctly. If it returns multiple results, STOP and report an error — manual disambiguation is required. Use the single resolved bead ID as YOUR_AGENT_BEAD in the commands below.
+This must resolve exactly one bead ID. If it fails, STOP and report the error. If it reports multiple results, STOP and report the ambiguity — manual disambiguation is required. Use the resolved `YOUR_AGENT_BEAD` in the commands below.
 
 Then use await-event to subscribe to the refinery event channel with exponential backoff:
 
 ```bash
-gt mol step await-event --channel refinery --agent-bead YOUR_AGENT_BEAD \
+gt mol step await-event --channel refinery --agent-bead "$YOUR_AGENT_BEAD" \
   --backoff-base 30s --backoff-mult 2 --backoff-max 15m --cleanup \
   --context-check-interval 5m
 ```
@@ -1156,7 +1156,7 @@ This command:
 **On event received** (refinery-specific activity):
 Reset the idle counter and start next patrol cycle:
 ```bash
-gt agent state YOUR_AGENT_BEAD --set idle=0
+gt agents state "$YOUR_AGENT_BEAD" --set idle=0
 ```
 
 **On timeout** (no events):

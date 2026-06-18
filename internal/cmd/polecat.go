@@ -349,7 +349,7 @@ func init() {
 
 	// Check-recovery flags
 	polecatCheckRecoveryCmd.Flags().BoolVar(&polecatCheckRecoveryJSON, "json", false, "Output as JSON")
-	polecatCheckRecoveryCmd.Flags().BoolVar(&polecatCheckRecoveryReconcileCleanup, "reconcile-cleanup", false, "Safely rewrite stale cleanup_status=clean when live recovery predicates prove no work is at risk")
+	polecatCheckRecoveryCmd.Flags().BoolVar(&polecatCheckRecoveryReconcileCleanup, "reconcile-cleanup", false, "Safely rewrite stale dirty cleanup_status to clean when live recovery predicates prove no work is at risk")
 
 	// Stale flags
 	polecatStaleCmd.Flags().BoolVar(&polecatStaleJSON, "json", false, "Output as JSON")
@@ -1012,6 +1012,7 @@ type RecoveryStatus struct {
 	ActiveMR             string                `json:"active_mr,omitempty"`
 	Blockers             []string              `json:"blockers,omitempty"`
 	Diagnostics          []string              `json:"diagnostics,omitempty"`
+	RecoveryActions      []string              `json:"recovery_actions,omitempty"`
 	Reconciled           bool                  `json:"reconciled,omitempty"`
 }
 
@@ -1135,7 +1136,7 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 				loadGitState()
 			}
 			gitSafe := activeMRGitSafeForWorktree(p.ClonePath)
-			if staleCleanupStatusCanBeIgnoredForRecovery(input.CleanupStatus, workTerminal, hookSafe, !activeMRAssessment.Pending, gitSafe) {
+			if polecat.CanIgnoreStaleCleanupStatus(input.CleanupStatus, workTerminal, hookSafe, !activeMRAssessment.Pending, gitSafe) {
 				input.IgnoreCleanupStatus = true
 				status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("ignored_stale_cleanup_status=%s direct_git_state=safe work_ref=terminal", input.CleanupStatus))
 			}
@@ -1195,6 +1196,13 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  %s Cleanup refused by these predicate(s):\n", style.Warning.Render("⚠"))
 			for _, blocker := range status.Blockers {
 				fmt.Printf("    - %s\n", blocker)
+			}
+			if len(status.RecoveryActions) > 0 {
+				fmt.Println()
+				fmt.Println("  Recovery action(s):")
+				for _, action := range status.RecoveryActions {
+					fmt.Printf("    - %s\n", action)
+				}
 			}
 		} else {
 			fmt.Printf("  %s Cleanup refused by an unknown recovery predicate.\n", style.Warning.Render("⚠"))
@@ -1263,6 +1271,7 @@ func applyWorkstateDispositionToRecoveryStatus(status *RecoveryStatus, dispositi
 	status.ReuseStatus = disposition.ReuseStatus
 	status.MQStatus = disposition.MQStatus
 	status.Blockers = disposition.Blockers
+	status.RecoveryActions = recoveryActionsForBlockers(disposition.Blockers)
 }
 
 type issueShower interface {
@@ -1297,14 +1306,6 @@ func agentHookBead(agentIssue *beads.Issue, fields *beads.AgentFields) string {
 		return fields.HookBead
 	}
 	return ""
-}
-
-func staleCleanupStatusCanBeIgnoredForRecovery(status polecat.CleanupStatus, workTerminal, hookSafe, activeMRSafe, gitSafe bool) bool {
-	return status == polecat.CleanupUnpushed &&
-		workTerminal &&
-		hookSafe &&
-		activeMRSafe &&
-		gitSafe
 }
 
 func activeMRGitSafeForWorktree(worktreePath string) bool {
@@ -1431,6 +1432,15 @@ func recoveryGitStateBlocker(worktreePath string, gitState *GitState, gitErr err
 		return fmt.Sprintf("git_state=has_stash stash_count=%d", gitState.StashCount)
 	}
 	return fmt.Sprintf("git_state=has_uncommitted uncommitted_files=%d", len(gitState.UncommittedFiles))
+}
+
+func recoveryActionsForBlockers(blockers []string) []string {
+	for _, blocker := range blockers {
+		if strings.HasPrefix(blocker, "git_state=has_stash") {
+			return []string{"preserve branch-owned stash entries to auditable recovery refs before cleanup, then rerun check-recovery"}
+		}
+	}
+	return nil
 }
 
 func activeMRBlocker(bd issueShower, mrID, sourceHint string, requireGitSafe, gitSafe bool) string {

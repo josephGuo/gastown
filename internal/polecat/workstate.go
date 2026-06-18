@@ -169,6 +169,22 @@ func DecideWorkstate(in WorkstateInput) WorkstateDisposition {
 	return d
 }
 
+// CanIgnoreStaleCleanupStatus returns true when a dirty persisted
+// cleanup_status is older than the direct predicates proving no work is at risk.
+// The status remains unsafe globally; callers must opt into this reconciliation
+// path only after gathering live git, hook, work, and active-MR facts.
+func CanIgnoreStaleCleanupStatus(status CleanupStatus, workTerminal, hookSafe, activeMRSafe, gitSafe bool) bool {
+	if !workTerminal || !hookSafe || !activeMRSafe || !gitSafe {
+		return false
+	}
+	switch status {
+	case CleanupUncommitted, CleanupStash, CleanupUnpushed:
+		return true
+	default:
+		return false
+	}
+}
+
 func itoa(n int) string {
 	if n == 0 {
 		return "0"

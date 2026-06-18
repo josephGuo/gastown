@@ -2186,11 +2186,16 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 	activeMR := ""
 	sourceHint := ""
 	_, fields, err := m.agentBeads().GetAgentBead(agentID)
+	hookSafe := true
+	hookTerminal := false
 	if err != nil {
 		input.GitCheckFailed = true
 	}
 	if err == nil && fields != nil {
-		input.HookBead = fields.HookBead
+		hookSafe, hookTerminal = m.hookBeadSafeForWorkstate(fields.HookBead)
+		if !hookSafe {
+			input.HookBead = fields.HookBead
+		}
 		input.PushFailed = fields.PushFailed
 		input.MRFailed = fields.MRFailed
 		input.ActiveMR = fields.ActiveMR
@@ -2237,17 +2242,25 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 	if input.CleanupStatus == CleanupUnknown && gitSafe {
 		input.CleanupStatus = CleanupClean
 	}
+	activeMRSafe := true
+	sourceTerminal := sourceHint != "" && m.assignedBeadTerminal(sourceHint)
 	if activeMR != "" {
 		assessment := AssessActiveMR(m.agentBeads(), ActiveMRInput{ActiveMR: activeMR, SourceIssueHint: sourceHint, RequireGitSafe: true, GitSafe: gitSafe})
 		if assessment.Pending {
 			input.ActiveMRBlocker = assessment.Reason
-		} else if input.CleanupStatus == CleanupUnpushed {
-			input.IgnoreCleanupStatus = true
+		}
+		activeMRSafe = !assessment.Pending
+		if assessment.SourceTerminal {
+			sourceTerminal = true
 		}
 	}
 	input.MQCheckRequired = input.Branch != ""
 	input.HasSubmittableWork = hasSubmittableWorkForWorkstate(clonePath)
 	input.AssignedBeadTerminal = m.assignedBeadTerminal(issue)
+	workTerminal := input.AssignedBeadTerminal || sourceTerminal || hookTerminal
+	if CanIgnoreStaleCleanupStatus(input.CleanupStatus, workTerminal, hookSafe, activeMRSafe, gitSafe) {
+		input.IgnoreCleanupStatus = true
+	}
 	input.MQNotRequired = m.mqNotRequiredSource(issue)
 	if input.MQCheckRequired && input.HasSubmittableWork && !input.AssignedBeadTerminal && !input.MQNotRequired {
 		mr, err := m.beads.FindMRForBranchAny(input.Branch)
@@ -2258,6 +2271,20 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 		}
 	}
 	return input
+}
+
+func (m *Manager) hookBeadSafeForWorkstate(hookBead string) (safe bool, terminal bool) {
+	if hookBead == "" {
+		return true, false
+	}
+	issue, err := m.beads.Show(hookBead)
+	if err != nil || issue == nil {
+		return false, false
+	}
+	if beads.IssueStatus(issue.Status).IsTerminal() {
+		return true, true
+	}
+	return false, false
 }
 
 func (m *Manager) assignedBeadTerminal(issueID string) bool {

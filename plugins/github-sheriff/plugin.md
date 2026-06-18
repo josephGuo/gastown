@@ -152,16 +152,15 @@ echo "$SUMMARY"
 
 On success:
 ```bash
-bd create "github-sheriff: $SUMMARY" -t chore --ephemeral \
-  -l type:plugin-run,plugin:github-sheriff,result:success \
-  -d "$SUMMARY" --silent 2>/dev/null || true
+gt plugin record-run --plugin github-sheriff --result success \
+  --title "github-sheriff: $SUMMARY" --description "$SUMMARY" >/dev/null 2>&1 || true
 ```
 
 On failure:
 ```bash
-bd create "github-sheriff: FAILED" -t chore --ephemeral \
-  -l type:plugin-run,plugin:github-sheriff,result:failure \
-  -d "GitHub sheriff failed: $ERROR" --silent 2>/dev/null || true
+gt plugin record-run --plugin github-sheriff --result failure \
+  --title "github-sheriff: FAILED" \
+  --description "GitHub sheriff failed: $ERROR" >/dev/null 2>&1 || true
 
 gt escalate "Plugin FAILED: github-sheriff" \
   --severity low \
