@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/lock"
+	"github.com/steveyegge/gastown/internal/refinery"
 	"github.com/steveyegge/gastown/internal/state"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/telemetry"
@@ -687,6 +688,14 @@ func checkSlungWork(ctx RoleContext, hookedBead *beads.Issue) (bool, error) {
 	if hookedBead == nil {
 		return false, nil
 	}
+	if ctx.Role == RoleRefinery {
+		if stop, err := refinery.ActiveSafetyStop(ctx.TownRoot, ctx.Rig); err != nil {
+			return true, fmt.Errorf("checking refinery safety stop: %w", err)
+		} else if stop != nil {
+			outputRefinerySafetyStopDirective(ctx, stop)
+			return true, nil
+		}
+	}
 
 	attachment := beads.ParseAttachmentFields(hookedBead)
 	hasWorkflow := hasWorkflowAttachment(attachment)
@@ -703,6 +712,14 @@ func checkSlungWork(ctx RoleContext, hookedBead *beads.Issue) (bool, error) {
 	}
 
 	return true, nil
+}
+
+func outputRefinerySafetyStopDirective(ctx RoleContext, stop *refinery.SafetyStop) {
+	fmt.Println()
+	fmt.Printf("%s\n", style.Bold.Render("## REFINERY SAFETY STOP ACTIVE"))
+	fmt.Printf("Refinery %s is %s.\n", ctx.Rig, stop.Reason())
+	fmt.Println("Hooked refinery work remains parked; do not run patrol, MR, or merge workflow until Mayor clears the safety_stop label.")
+	fmt.Println()
 }
 
 func hasWorkflowAttachment(attachment *beads.AttachmentFields) bool {
@@ -888,15 +905,15 @@ func findAgentWorkOnce(ctx RoleContext, agentID string) (*beads.Issue, error) {
 	return hookedBeads[0], nil
 }
 
-// rigBeadsRoot returns the directory to use for beads queries.
-// For rig-level agents (polecats, crew, witness, refinery), returns the rig
-// root (e.g., ~/gt/myrig/) which has the authoritative .beads/ database.
-// For town-level agents, returns ctx.WorkDir unchanged.
-//
-// This avoids relying on .beads/redirect in polecat worktrees, which can
-// fail to resolve and cause polecats to see no hooked work. (GH#2503)
+// rigBeadsRoot returns the route-owned directory to use for beads queries.
+// For rig-level agents (polecats, crew, witness, refinery), prefer the rig DB
+// from town routes rather than rig-root metadata, which can be a stale redirect
+// shim during recovery. For town-level agents, returns ctx.WorkDir unchanged.
 func rigBeadsRoot(ctx RoleContext) string {
 	if ctx.Rig != "" && ctx.TownRoot != "" {
+		if rigDir := beads.GetRigDirForName(ctx.TownRoot, ctx.Rig); rigDir != "" {
+			return rigDir
+		}
 		return filepath.Join(ctx.TownRoot, ctx.Rig)
 	}
 	return ctx.WorkDir

@@ -51,9 +51,9 @@ func TestEngineer_LoadConfig_MergeStrategyDefault(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	config := map[string]interface{}{
-		"type":    "rig",
-		"version": 1,
-		"name":    "test-rig",
+		"type":        "rig",
+		"version":     1,
+		"name":        "test-rig",
 		"merge_queue": map[string]interface{}{},
 	}
 
@@ -87,7 +87,7 @@ func TestDoMerge_PRStrategy_RoutesToPRPath(t *testing.T) {
 	// Create a feature branch
 	createFeatureBranch(t, workDir, "feat/test-pr", "test.txt", "hello")
 
-	result := e.doMerge(context.Background(), "feat/test-pr", "main", "gt-test")
+	result := e.doMerge(context.Background(), &MRInfo{ID: "mr-test-pr", Branch: "feat/test-pr", Target: "main"})
 
 	if result.Success {
 		t.Error("expected failure (no GitHub PR exists)")
@@ -107,7 +107,7 @@ func TestDoMerge_DirectStrategy_SkipsPRPath(t *testing.T) {
 
 	createFeatureBranch(t, workDir, "feat/test-direct", "test.txt", "hello")
 
-	result := e.doMerge(context.Background(), "feat/test-direct", "main", "gt-test")
+	result := e.doMerge(context.Background(), &MRInfo{ID: "mr-test-direct", Branch: "feat/test-direct", Target: "main"})
 
 	// Should succeed with direct merge
 	if !result.Success {
@@ -120,6 +120,34 @@ func TestDoMerge_DirectStrategy_SkipsPRPath(t *testing.T) {
 	}
 }
 
+func TestDoMerge_DirectStrategy_BlocksForkBackedDefaultPush(t *testing.T) {
+	workDir, g, _ := testGitRepo(t)
+	addDistinctUpstreamRemote(t, workDir, g)
+	e := newTestEngineer(t, workDir, g)
+	e.config.MergeStrategy = ""
+
+	createFeatureBranch(t, workDir, "feat/fork-guard", "fork.txt", "hello")
+	before := run(t, workDir, "git", "rev-parse", "origin/main")
+
+	result := e.doMerge(context.Background(), &MRInfo{ID: "mr-fork-guard", Branch: "feat/fork-guard", Target: "main"})
+	if result.Success {
+		t.Fatal("expected fork-backed default push to be refused")
+	}
+	if !strings.Contains(result.Error, "refusing direct push") {
+		t.Fatalf("expected direct-push refusal, got: %s", result.Error)
+	}
+	assertOriginMainUnchangedAndReset(t, workDir, before)
+}
+
+func addDistinctUpstreamRemote(t *testing.T, workDir string, g *gitpkg.Git) {
+	t.Helper()
+	upstream := filepath.Join(t.TempDir(), "upstream.git")
+	run(t, filepath.Dir(upstream), "git", "init", "--bare", "--initial-branch=main", upstream)
+	if _, err := g.AddRemote("upstream", upstream); err != nil {
+		t.Fatalf("AddRemote upstream: %v", err)
+	}
+}
+
 func TestDoMergePR_NoPR_ReturnsError(t *testing.T) {
 	// doMergePR should return an error when no PR exists for the branch.
 	workDir, g, _ := testGitRepo(t)
@@ -127,7 +155,7 @@ func TestDoMergePR_NoPR_ReturnsError(t *testing.T) {
 
 	createFeatureBranch(t, workDir, "feat/no-pr", "test.txt", "hello")
 
-	result := e.doMergePR(context.Background(), "feat/no-pr", "main")
+	result := e.doMergePR(context.Background(), &MRInfo{ID: "mr-no-pr", Branch: "feat/no-pr", Target: "main"})
 
 	if result.Success {
 		t.Error("expected failure when no PR exists")

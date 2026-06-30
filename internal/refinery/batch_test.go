@@ -94,6 +94,7 @@ func newTestEngineer(t *testing.T, workDir string, g *gitpkg.Git) *Engineer {
 	e.git = g
 	e.workDir = workDir
 	e.output = &bytes.Buffer{}
+	e.testAllowSyntheticMRs = true
 	// No-op merge slot functions for tests
 	e.mergeSlotEnsureExists = func() (string, error) { return "test-slot", nil }
 	e.mergeSlotAcquire = func(holder string, addWaiter bool) (*beads.MergeSlotStatus, error) {
@@ -131,6 +132,24 @@ func TestDefaultBatchConfig(t *testing.T) {
 	if !cfg.RetryBatchOnFlaky {
 		t.Error("expected RetryBatchOnFlaky true")
 	}
+}
+
+func TestFastForwardBatch_BlocksForkBackedDefaultPush(t *testing.T) {
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+	addDistinctUpstreamRemote(t, workDir, g)
+	e := newTestEngineer(t, workDir, g)
+	before := run(t, workDir, "git", "rev-parse", "origin/main")
+
+	writeFile(t, workDir, "batched.txt", "batched\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "batch result")
+
+	result := e.fastForwardBatch(context.Background(), nil, "main", &BatchResult{})
+	if result.Error == nil || !strings.Contains(result.Error.Error(), "refusing direct push") {
+		t.Fatalf("expected fork-backed default push refusal, got: %+v", result)
+	}
+	assertOriginMainUnchangedAndReset(t, workDir, before)
 }
 
 // --- AssembleBatch tests ---

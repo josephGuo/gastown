@@ -14,22 +14,22 @@ import (
 // Embeds beadsdk.Storage to satisfy unimplemented methods (they panic if called).
 type mockStorage struct {
 	beadsdk.Storage // embedded for unimplemented methods
-	issues     map[string]*beadsdk.Issue
-	labels     map[string][]string // issueID -> labels
-	deps       map[string][]string // issueID -> depends-on IDs
-	nextID     int
-	prefix     string
-	closed     map[string]bool
-	closeErr   error
-	createErr  error
-	updateErr  error
-	searchErr  error
-	getErr     error
-	addLabelErr    error
-	removeLabelErr error
-	addDepErr      error
-	removeDepErr   error
-	getLabelsErr   error
+	issues          map[string]*beadsdk.Issue
+	labels          map[string][]string // issueID -> labels
+	deps            map[string][]string // issueID -> depends-on IDs
+	nextID          int
+	prefix          string
+	closed          map[string]bool
+	closeErr        error
+	createErr       error
+	updateErr       error
+	searchErr       error
+	getErr          error
+	addLabelErr     error
+	removeLabelErr  error
+	addDepErr       error
+	removeDepErr    error
+	getLabelsErr    error
 }
 
 func newMockStorage() *mockStorage {
@@ -75,6 +75,30 @@ func (m *mockStorage) GetIssuesByIDs(_ context.Context, ids []string) ([]*beadsd
 		if issue, ok := m.issues[id]; ok {
 			result = append(result, issue)
 		}
+	}
+	return result, nil
+}
+
+func (m *mockStorage) GetDependenciesWithMetadata(_ context.Context, issueID string) ([]*beadsdk.IssueWithDependencyMetadata, error) {
+	issue, ok := m.issues[issueID]
+	if !ok {
+		return nil, fmt.Errorf("issue %s not found", issueID)
+	}
+
+	var result []*beadsdk.IssueWithDependencyMetadata
+	for _, dep := range issue.Dependencies {
+		if dep.IssueID != issueID {
+			continue
+		}
+
+		target, ok := m.issues[dep.DependsOnID]
+		if !ok {
+			target = &beadsdk.Issue{ID: dep.DependsOnID}
+		}
+		result = append(result, &beadsdk.IssueWithDependencyMetadata{
+			Issue:          *target,
+			DependencyType: dep.Type,
+		})
 	}
 	return result, nil
 }
@@ -213,7 +237,6 @@ func (m *mockStorage) RemoveDependency(_ context.Context, issueID, dependsOnID, 
 	}
 	return nil
 }
-
 
 func (m *mockStorage) AddLabel(_ context.Context, issueID, label, _ string) error {
 	if m.addLabelErr != nil {
@@ -724,6 +747,61 @@ func TestSdkIssueToIssueDependsOnInit(t *testing.T) {
 	}
 	if len(issue.DependsOn) != 2 {
 		t.Fatalf("expected 2 deps, got %d", len(issue.DependsOn))
+	}
+}
+
+func TestStoreShowMultipleHydratesDependencyMetadata(t *testing.T) {
+	store := newMockStorage()
+	b := newTestBeads(store)
+	store.issues["gt-mr"] = &beadsdk.Issue{
+		ID:     "gt-mr",
+		Title:  "merge request",
+		Status: beadsdk.StatusOpen,
+		Dependencies: []*beadsdk.Dependency{
+			{IssueID: "gt-mr", DependsOnID: "gt-blocker", Type: beadsdk.DepBlocks},
+			{IssueID: "gt-mr", DependsOnID: "gt-wait", Type: beadsdk.DependencyType("waits-for")},
+			{IssueID: "gt-mr", DependsOnID: "gt-parent", Type: beadsdk.DepParentChild},
+			{IssueID: "gt-dependent", DependsOnID: "gt-mr", Type: beadsdk.DepBlocks},
+		},
+	}
+	store.issues["gt-blocker"] = &beadsdk.Issue{ID: "gt-blocker", Title: "blocker", Status: beadsdk.StatusOpen}
+	store.issues["gt-wait"] = &beadsdk.Issue{ID: "gt-wait", Title: "closed wait", Status: beadsdk.StatusClosed}
+	store.issues["gt-parent"] = &beadsdk.Issue{ID: "gt-parent", Title: "parent", Status: beadsdk.StatusOpen}
+	store.issues["gt-merge-mr"] = &beadsdk.Issue{
+		ID:     "gt-merge-mr",
+		Title:  "merge-blocked request",
+		Status: beadsdk.StatusOpen,
+		Dependencies: []*beadsdk.Dependency{
+			{IssueID: "gt-merge-mr", DependsOnID: "gt-merged", Type: beadsdk.DependencyType("merge-blocks")},
+		},
+	}
+	store.issues["gt-merged"] = &beadsdk.Issue{ID: "gt-merged", Title: "merged dependency", Status: beadsdk.StatusClosed, CloseReason: "Merged in gt-wisp"}
+
+	issues, err := b.storeShowMultiple([]string{"gt-mr", "gt-merge-mr"})
+	if err != nil {
+		t.Fatalf("storeShowMultiple: %v", err)
+	}
+	issue := issues["gt-mr"]
+	if issue == nil {
+		t.Fatal("missing hydrated issue")
+	}
+	if issue.Parent != "gt-parent" {
+		t.Fatalf("Parent = %q, want gt-parent", issue.Parent)
+	}
+	if len(issue.DependsOn) != 2 {
+		t.Fatalf("DependsOn len = %d, want 2: %#v", len(issue.DependsOn), issue.DependsOn)
+	}
+	if len(issue.Dependencies) != 3 {
+		t.Fatalf("Dependencies len = %d, want 3: %#v", len(issue.Dependencies), issue.Dependencies)
+	}
+	if got := FirstUnresolvedBlockerID(issue); got != "gt-blocker" {
+		t.Fatalf("FirstUnresolvedBlockerID() = %q, want gt-blocker", got)
+	}
+	if !HasUnresolvedBlockers(issue) {
+		t.Fatal("SDK dependencies should feed shared blocker semantics")
+	}
+	if HasUnresolvedBlockers(issues["gt-merge-mr"]) {
+		t.Fatal("store-backed merged merge-block should be resolved")
 	}
 }
 

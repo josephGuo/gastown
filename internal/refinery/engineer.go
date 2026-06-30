@@ -268,6 +268,7 @@ type Engineer struct {
 	mergeSlotRelease      func(holder string) error
 	mergeSlotMaxRetries   int           // Max retries for slot acquisition (0 = no retry)
 	mergeSlotRetryBackoff time.Duration // Initial backoff between retries
+	testAllowSyntheticMRs bool          // Test-only: legacy merge-mechanics tests use synthetic MRs without beads.
 }
 
 // NewEngineer creates a new Engineer for the given rig.
@@ -492,22 +493,22 @@ type ProcessResult struct {
 	TestsFailed    bool
 	SlotTimeout    bool // Merge slot contention timeout (distinct from build/test failure)
 	BranchNotFound bool // Source branch no longer exists (e.g. cleaned up after cherry-pick)
-	NoMerge        bool // Source issue has no_merge flag — intentionally blocked, not a failure
+	NoMerge        bool // MR/source is intentionally not merge-eligible, not a build failure
 	NeedsApproval  bool // PR exists but lacks required approving review (merge_strategy=pr)
 }
 
 // doMerge performs the actual git merge operation.
-func (e *Engineer) doMerge(ctx context.Context, branch, target, sourceIssue string, skipGates ...bool) ProcessResult {
-	// GH#2778: Check no_merge flag on source issue before merging. The polecat
-	// normally skips MR creation when no_merge is set, but if an MR is created
-	// manually (e.g., gh pr create) the refinery would otherwise auto-merge it.
-	if sourceIssue != "" {
-		if si, err := e.beads.Show(sourceIssue); err == nil && si != nil {
-			if af := beads.ParseAttachmentFields(si); af != nil && af.NoMerge {
-				_, _ = fmt.Fprintf(e.output, "[Engineer] Source issue %s has no_merge=true — skipping merge\n", sourceIssue)
-				return ProcessResult{NoMerge: true, Error: "no_merge flag set on source issue"}
-			}
+func (e *Engineer) doMerge(ctx context.Context, mr *MRInfo, skipGates ...bool) ProcessResult {
+	if mr == nil {
+		return ProcessResult{Success: false, Error: "merge request is missing"}
+	}
+	branch, target := mr.Branch, mr.Target
+
+	if eligibility := e.recheckMRStillMergeable(mr, target); !eligibility.Success {
+		if eligibility.NoMerge {
+			_, _ = fmt.Fprintf(e.output, "[Engineer] MR %s is not merge-eligible — skipping merge: %s\n", mr.ID, eligibility.Error)
 		}
+		return eligibility
 	}
 
 	// Step 1: Verify source branch exists locally (shared .repo.git with polecats)
@@ -581,6 +582,9 @@ func (e *Engineer) doMerge(ctx context.Context, branch, target, sourceIssue stri
 			if sc.NewSHA == "" {
 				continue // Submodule removed, nothing to push
 			}
+			if eligibility := e.recheckMRStillMergeable(mr, target); !eligibility.Success {
+				return eligibility
+			}
 			_, _ = fmt.Fprintf(e.output, "[Engineer] Pushing submodule %s (commit %s)...\n", sc.Path, shortSHA(sc.NewSHA))
 			if pushErr := e.git.PushSubmoduleCommit(sc.Path, sc.NewSHA, "origin"); pushErr != nil {
 				return ProcessResult{
@@ -623,7 +627,7 @@ func (e *Engineer) doMerge(ctx context.Context, branch, target, sourceIssue stri
 	// protection/restriction rules and preserves the PR audit trail.
 	// The VCS provider (GitHub, Bitbucket) is selected via vcs_provider config.
 	if e.config.MergeStrategy == "pr" {
-		return e.doMergePR(ctx, branch, target)
+		return e.doMergePR(ctx, mr)
 	}
 
 	// Step 5: Perform the actual merge using squash merge
@@ -633,8 +637,8 @@ func (e *Engineer) doMerge(ctx context.Context, branch, target, sourceIssue stri
 	if err != nil {
 		// Fallback to a descriptive message if we can't get the original
 		originalMsg = fmt.Sprintf("Squash merge %s into %s", branch, target)
-		if sourceIssue != "" {
-			originalMsg = fmt.Sprintf("Squash merge %s into %s (%s)", branch, target, sourceIssue)
+		if mr.SourceIssue != "" {
+			originalMsg = fmt.Sprintf("Squash merge %s into %s (%s)", branch, target, mr.SourceIssue)
 		}
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: could not get original commit message: %v\n", err)
 	}
@@ -716,6 +720,13 @@ func (e *Engineer) doMerge(ctx context.Context, branch, target, sourceIssue stri
 			}()
 		}
 
+		if eligibility := e.recheckMRStillMergeable(mr, target); !eligibility.Success {
+			if resetErr := e.git.ResetHard("origin/" + target); resetErr != nil {
+				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to reset %s after pre-push eligibility failure: %v\n", target, resetErr)
+			}
+			return eligibility
+		}
+
 		_, _ = fmt.Fprintf(e.output, "[Engineer] Pushing to origin/%s...\n", target)
 		if err := e.git.Push("origin", target, false); err != nil {
 			// Reset the checked-out target branch to undo the local squash commit.
@@ -754,8 +765,12 @@ func (e *Engineer) doMerge(ctx context.Context, branch, target, sourceIssue stri
 // Called from doMerge after quality gates have passed.
 //
 //nolint:unparam // ctx is reserved for future use when git methods accept context
-func (e *Engineer) doMergePR(ctx context.Context, branch, target string) ProcessResult {
+func (e *Engineer) doMergePR(ctx context.Context, mr *MRInfo) ProcessResult {
 	_ = ctx
+	if mr == nil {
+		return ProcessResult{Success: false, Error: "merge request is missing"}
+	}
+	branch, target := mr.Branch, mr.Target
 	provider := e.config.VCSProvider
 	if provider == "" {
 		provider = "github"
@@ -806,6 +821,10 @@ func (e *Engineer) doMergePR(ctx context.Context, branch, target string) Process
 		_, _ = fmt.Fprintf(e.output, "[Engineer] PR #%d has approving review\n", prNumber)
 	}
 
+	if eligibility := e.recheckMRStillMergeable(mr, target); !eligibility.Success {
+		return eligibility
+	}
+
 	// Step PR.3: Merge via VCS provider API using squash merge
 	_, _ = fmt.Fprintf(e.output, "[Engineer] Merging PR #%d via %s API (squash)...\n", prNumber, provider)
 	mergeCommit, err := e.prProvider.MergePR(prNumber, "squash")
@@ -839,6 +858,169 @@ func (e *Engineer) doMergePR(ctx context.Context, branch, target string) Process
 	return ProcessResult{
 		Success:     true,
 		MergeCommit: mergeCommit,
+	}
+}
+
+func mergeIneligibleResult(format string, args ...interface{}) ProcessResult {
+	return ProcessResult{
+		Success: false,
+		NoMerge: true,
+		Error:   fmt.Sprintf(format, args...),
+	}
+}
+
+func (e *Engineer) recheckMRStillMergeable(mr *MRInfo, target string) ProcessResult {
+	if mr == nil {
+		return ProcessResult{Success: false, Error: "merge request is missing"}
+	}
+
+	sourceIssue := strings.TrimSpace(mr.SourceIssue)
+	if sourceIssue == "" {
+		if e.isSyntheticMergeMechanicsMR(mr) {
+			return ProcessResult{Success: true}
+		}
+		return e.rejectMRBeforeMerge(mr, "MR has missing source_issue")
+	}
+
+	if mrID := strings.TrimSpace(mr.ID); mrID != "" && !e.isSyntheticMergeMechanicsMR(mr) {
+		mrIssue, err := e.beads.Show(mrID)
+		if err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				return mergeIneligibleResult("MR %s no longer exists", mrID)
+			}
+			return ProcessResult{Success: false, Error: fmt.Sprintf("pre-push recheck MR %s: %v", mrID, err)}
+		}
+		if mrIssue == nil {
+			return mergeIneligibleResult("MR %s no longer exists", mrID)
+		}
+		if beads.IssueStatus(strings.TrimSpace(mrIssue.Status)) != beads.StatusOpen {
+			return mergeIneligibleResult("MR %s status is %s", mrID, mrIssue.Status)
+		}
+		if beads.HasLabel(mrIssue, "gt:owned-direct") {
+			return e.rejectMRBeforeMerge(mr, "MR is owned-direct")
+		}
+
+		fields := beads.ParseMRFields(mrIssue)
+		if fields == nil {
+			return e.rejectMRBeforeMerge(mr, "MR has missing merge-request fields")
+		}
+		if closeReason := strings.TrimSpace(fields.CloseReason); closeReason != "" {
+			if strings.EqualFold(closeReason, string(CloseReasonMerged)) {
+				if err := e.closeMRWithReason(mr, string(CloseReasonMerged)); err != nil {
+					return ProcessResult{Success: false, Error: fmt.Sprintf("failed to close already-merged MR %s: %v", mrID, err)}
+				}
+				return mergeIneligibleResult("MR close_reason is %s", closeReason)
+			}
+			return e.rejectMRBeforeMerge(mr, fmt.Sprintf("MR close_reason is %s", closeReason))
+		}
+		if fields.Branch != "" && mr.Branch != "" && fields.Branch != mr.Branch {
+			return e.rejectMRBeforeMerge(mr, fmt.Sprintf("MR branch changed from %s to %s", mr.Branch, fields.Branch))
+		}
+		if strings.TrimSpace(fields.Target) == "" {
+			return e.rejectMRBeforeMerge(mr, "MR has missing target")
+		}
+		if fields.Target != target {
+			return e.rejectMRBeforeMerge(mr, fmt.Sprintf("MR target changed from %s to %s", target, fields.Target))
+		}
+		if fields.Rig != "" && !strings.EqualFold(fields.Rig, e.rig.Name) {
+			return e.rejectMRBeforeMerge(mr, fmt.Sprintf("MR belongs to rig %s", fields.Rig))
+		}
+		if strings.TrimSpace(fields.SourceIssue) == "" {
+			return e.rejectMRBeforeMerge(mr, "MR has missing source_issue")
+		}
+		if fields.SourceIssue != sourceIssue {
+			return e.rejectMRBeforeMerge(mr, fmt.Sprintf("MR source_issue changed from %s to %s", sourceIssue, fields.SourceIssue))
+		}
+		sourceIssue = fields.SourceIssue
+	}
+
+	return e.recheckMRSourceStillMergeable(mr, sourceIssue)
+}
+
+func (e *Engineer) isSyntheticMergeMechanicsMR(mr *MRInfo) bool {
+	return e.testAllowSyntheticMRs && mr != nil && strings.HasPrefix(strings.TrimSpace(mr.ID), "mr-") && strings.TrimSpace(mr.SourceIssue) == ""
+}
+
+func (e *Engineer) rejectMRBeforeMerge(mr *MRInfo, reason string) ProcessResult {
+	if err := e.closeIneligibleMR(mr, reason); err != nil {
+		mrID := "<missing>"
+		if mr != nil && mr.ID != "" {
+			mrID = mr.ID
+		}
+		return ProcessResult{Success: false, Error: fmt.Sprintf("failed to close ineligible MR %s: %v", mrID, err)}
+	}
+	return mergeIneligibleResult("%s", reason)
+}
+
+func (e *Engineer) recheckMRSourceStillMergeable(mr *MRInfo, sourceIssue string) ProcessResult {
+	issue, err := e.beads.Show(sourceIssue)
+	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return e.rejectMRBeforeMerge(mr, fmt.Sprintf("source_issue %s is missing", sourceIssue))
+		}
+		return ProcessResult{Success: false, Error: fmt.Sprintf("pre-push recheck source_issue %s: %v", sourceIssue, err)}
+	}
+	if issue == nil {
+		return e.rejectMRBeforeMerge(mr, fmt.Sprintf("source_issue %s is missing", sourceIssue))
+	}
+	if beads.IssueStatus(issue.Status).IsTerminal() {
+		return e.rejectMRBeforeMerge(mr, fmt.Sprintf("source_issue %s status is %s", sourceIssue, issue.Status))
+	}
+	if reason := refinerySourceIssueConcreteReason(issue); reason != "" {
+		return e.rejectMRBeforeMerge(mr, fmt.Sprintf("source_issue %s is not concrete (%s)", sourceIssue, reason))
+	}
+	if af := beads.ParseAttachmentFields(issue); af != nil {
+		switch {
+		case af.NoMerge:
+			return e.rejectMRBeforeMerge(mr, fmt.Sprintf("source_issue %s has no_merge=true", sourceIssue))
+		case af.ReviewOnly:
+			return e.rejectMRBeforeMerge(mr, fmt.Sprintf("source_issue %s has review_only=true", sourceIssue))
+		case strings.EqualFold(strings.TrimSpace(af.MergeStrategy), "local"):
+			return e.rejectMRBeforeMerge(mr, fmt.Sprintf("source_issue %s has merge_strategy=local", sourceIssue))
+		}
+	}
+	return ProcessResult{Success: true}
+}
+
+func refinerySourceIssueConcreteReason(issue *beads.Issue) string {
+	if issue == nil || strings.TrimSpace(issue.ID) == "" {
+		return "source-missing"
+	}
+	if issue.Ephemeral {
+		return "ephemeral"
+	}
+	if strings.Contains(strings.ToLower(issue.ID), "-wisp-") {
+		return "wisp-id"
+	}
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(issue.ID)), "mol-") {
+		return "formula-id"
+	}
+	if refineryInternalIssueType(issue.Type) {
+		return "internal-type:" + strings.ToLower(strings.TrimSpace(issue.Type))
+	}
+	for _, label := range issue.Labels {
+		if refineryInternalIssueLabel(label) {
+			return "internal-label:" + strings.ToLower(strings.TrimSpace(label))
+		}
+	}
+	return ""
+}
+
+func refineryInternalIssueType(issueType string) bool {
+	switch strings.ToLower(strings.TrimSpace(issueType)) {
+	case "wisp", "message", "handoff", "merge-request", "agent", "queue", "convoy", "formula":
+		return true
+	default:
+		return false
+	}
+}
+
+func refineryInternalIssueLabel(label string) bool {
+	switch strings.ToLower(strings.TrimSpace(label)) {
+	case "gt:wisp", "gt:message", "gt:handoff", "gt:merge-request", "gt:agent", "gt:queue", "gt:convoy", "gt:formula":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -1161,7 +1343,7 @@ func (e *Engineer) ProcessMRInfo(ctx context.Context, mr *MRInfo) ProcessResult 
 	}
 
 	// Use the shared merge logic
-	return e.doMerge(ctx, mr.Branch, mr.Target, mr.SourceIssue, skipGates)
+	return e.doMerge(ctx, mr, skipGates)
 }
 
 // HandleMRInfoSuccess handles a successful merge from MRInfo.
@@ -1305,10 +1487,18 @@ func (e *Engineer) HandleMRInfoFailure(mr *MRInfo, result ProcessResult) {
 		return
 	}
 
-	// No-merge is intentional — the source issue has no_merge=true. Not a failure.
-	// No polecat or mayor notification needed; the MR is simply dequeued.
+	// Policy ineligibility is intentional — not a build/test failure.
+	// No polecat or mayor notification needed; close any still-open MR so it
+	// cannot retry forever after a no-merge/review-only/rejected decision.
 	if result.NoMerge {
-		_, _ = fmt.Fprintf(e.output, "[Engineer] MR %s: no_merge flag set on source issue, dequeued\n", mr.ID)
+		reason := strings.TrimSpace(result.Error)
+		if reason == "" {
+			reason = "merge request is not merge-eligible"
+		}
+		_, _ = fmt.Fprintf(e.output, "[Engineer] MR %s: %s, dequeued\n", mr.ID, reason)
+		if closeErr := e.closeIneligibleMR(mr, reason); closeErr != nil {
+			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to close ineligible MR %s: %v\n", mr.ID, closeErr)
+		}
 		return
 	}
 
@@ -1404,6 +1594,50 @@ func (e *Engineer) HandleMRInfoFailure(mr *MRInfo, result ProcessResult) {
 	} else {
 		_, _ = fmt.Fprintln(e.output, "[Engineer] MR remains in queue for retry")
 	}
+}
+
+func (e *Engineer) closeIneligibleMR(mr *MRInfo, reason string) error {
+	return e.closeMRWithReason(mr, "rejected: "+reason)
+}
+
+func (e *Engineer) closeMRWithReason(mr *MRInfo, closeReason string) error {
+	if mr == nil || strings.TrimSpace(mr.ID) == "" {
+		return nil
+	}
+	issue, err := e.beads.Show(mr.ID)
+	if err != nil {
+		if !errors.Is(err, beads.ErrNotFound) {
+			return fmt.Errorf("fetch MR for close: %w", err)
+		}
+		return nil
+	}
+	if issue == nil || beads.IssueStatus(issue.Status) != beads.StatusOpen {
+		return nil
+	}
+
+	fields := beads.ParseMRFields(issue)
+	if fields == nil {
+		fields = &beads.MRFields{}
+	}
+	fields.CloseReason = normalizedMRCloseReason(closeReason)
+	newDesc := beads.SetMRFields(issue, fields)
+	if err := e.beads.Update(mr.ID, beads.UpdateOptions{Description: &newDesc}); err != nil {
+		return fmt.Errorf("record MR close reason: %w", err)
+	}
+
+	if err := e.beads.CloseWithReason(closeReason, mr.ID); err != nil {
+		return fmt.Errorf("close MR: %w", err)
+	}
+	_, _ = fmt.Fprintf(e.output, "[Engineer] Closed MR bead: %s (%s)\n", mr.ID, closeReason)
+	return nil
+}
+
+func normalizedMRCloseReason(closeReason string) string {
+	closeReason = strings.TrimSpace(closeReason)
+	if strings.HasPrefix(strings.ToLower(closeReason), "rejected:") {
+		return string(CloseReasonRejected)
+	}
+	return closeReason
 }
 
 // createConflictResolutionTaskForMR creates a dispatchable task for resolving merge conflicts.
@@ -1655,18 +1889,6 @@ func conflictTaskMetadata(description string) map[string]string {
 	return metadata
 }
 
-// IsBeadOpen checks if a bead is still open (not closed).
-// This is used as a status checker to filter blocked MRs.
-func (e *Engineer) IsBeadOpen(beadID string) (bool, error) {
-	issue, err := e.beads.Show(beadID)
-	if err != nil {
-		// If we can't find the bead, treat as not open (fail open - allow MR to proceed)
-		return false, nil
-	}
-	// "closed" status means the bead is done
-	return issue.Status != "closed", nil
-}
-
 // issueToMRInfo converts a beads issue (with parsed MR fields) into an MRInfo.
 // Shared by ListReadyMRs, ListBlockedMRs, and ListAllOpenMRs.
 func issueToMRInfo(issue *beads.Issue, fields *beads.MRFields) *MRInfo {
@@ -1722,21 +1944,14 @@ func issueToMRInfo(issue *beads.Issue, fields *beads.MRFields) *MRInfo {
 	}
 }
 
-// firstOpenBlocker returns the ID of the first open blocker for an issue,
-// or empty string if none are open.
+// firstOpenBlocker returns the first unresolved blocker ID for an issue.
 func (e *Engineer) firstOpenBlocker(issue *beads.Issue) string {
-	for _, blockerID := range issue.BlockedBy {
-		isOpen, err := e.IsBeadOpen(blockerID)
-		if err == nil && isOpen {
-			return blockerID
-		}
-	}
-	return ""
+	return beads.FirstUnresolvedBlockerID(issue)
 }
 
 // ListReadyMRs returns MRs that are ready for processing:
 // - Not claimed by another worker (checked via assignee field)
-// - Not blocked by an open task (checked via firstOpenBlocker)
+// - Not blocked by unresolved dependencies
 // Sorted by priority (highest first).
 //
 // Uses bd list instead of bd ready because MRs are ephemeral beads and
@@ -1750,6 +1965,7 @@ func (e *Engineer) ListReadyMRs() ([]*MRInfo, error) {
 		Status:   "open",
 		Label:    "gt:merge-request",
 		Priority: -1, // No priority filter
+		Rig:      e.rig.Name,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("querying beads for merge-requests: %w", err)
@@ -1764,7 +1980,7 @@ func (e *Engineer) ListReadyMRs() ([]*MRInfo, error) {
 		}
 
 		// Skip blocked MRs (replaces bd ready's blocker filtering)
-		if blockedBy := e.firstOpenBlocker(issue); blockedBy != "" {
+		if beads.HasUnresolvedBlockers(issue) {
 			continue
 		}
 
@@ -1818,6 +2034,7 @@ func (e *Engineer) ListBlockedMRs() ([]*MRInfo, error) {
 		Status:   "open",
 		Label:    "gt:merge-request",
 		Priority: -1, // No priority filter
+		Rig:      e.rig.Name,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("querying beads for merge-requests: %w", err)
@@ -1826,16 +2043,15 @@ func (e *Engineer) ListBlockedMRs() ([]*MRInfo, error) {
 	// Filter for blocked issues (those with open blockers)
 	var mrs []*MRInfo
 	for _, issue := range issues {
-		// Skip if not blocked
-		if len(issue.BlockedBy) == 0 {
+		if issue.Status != "open" {
 			continue
 		}
 
-		// Check if any blocker is still open
-		blockedBy := e.firstOpenBlocker(issue)
-		if blockedBy == "" {
-			continue // All blockers are closed, not blocked
+		if !beads.HasUnresolvedBlockers(issue) {
+			continue
 		}
+
+		blockedBy := e.firstOpenBlocker(issue)
 
 		fields := beads.ParseMRFields(issue)
 		if fields == nil {
@@ -1865,6 +2081,7 @@ func (e *Engineer) ListAllOpenMRs() ([]*MRInfo, error) {
 		Status:   "open",
 		Label:    "gt:merge-request",
 		Priority: -1,
+		Rig:      e.rig.Name,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("querying beads for merge-requests: %w", err)
@@ -1906,6 +2123,7 @@ func (e *Engineer) ListQueueAnomalies(now time.Time) ([]*MRAnomaly, error) {
 		Status:   "open",
 		Label:    "gt:merge-request",
 		Priority: -1,
+		Rig:      e.rig.Name,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("querying beads for merge-requests: %w", err)

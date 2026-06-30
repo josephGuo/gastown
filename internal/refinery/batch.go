@@ -213,6 +213,9 @@ func (e *Engineer) ProcessBatch(ctx context.Context, batch []*MRInfo, target str
 	}
 
 	_, _ = fmt.Fprintf(e.output, "[Batch] Processing batch of %d MRs targeting %s\n", len(batch), target)
+	if !e.recheckBatchEligibility(batch, target, result) {
+		return result
+	}
 
 	// Step 1: Build the stack
 	stacked, conflicts, err := e.BuildRebaseStack(ctx, batch, target)
@@ -287,10 +290,27 @@ func (e *Engineer) ProcessBatch(ctx context.Context, batch []*MRInfo, target str
 	return result
 }
 
+func (e *Engineer) recheckBatchEligibility(batch []*MRInfo, target string, result *BatchResult) bool {
+	for _, mr := range batch {
+		if eligibility := e.recheckMRStillMergeable(mr, target); !eligibility.Success {
+			if eligibility.NoMerge {
+				_, _ = fmt.Fprintf(e.output, "[Batch] MR %s is not merge-eligible: %s\n", mr.ID, eligibility.Error)
+				e.HandleMRInfoFailure(mr, eligibility)
+			} else {
+				result.Error = fmt.Errorf("pre-batch eligibility recheck failed for %s: %s", mr.ID, eligibility.Error)
+			}
+			return false
+		}
+	}
+	return true
+}
+
 // processSingleMR handles the degenerate case of a batch with one MR.
 func (e *Engineer) processSingleMR(ctx context.Context, mr *MRInfo, target string) *BatchResult {
 	result := &BatchResult{}
-	processResult := e.doMerge(ctx, mr.Branch, target, mr.SourceIssue)
+	mergeMR := *mr
+	mergeMR.Target = target
+	processResult := e.doMerge(ctx, &mergeMR)
 	if processResult.Success {
 		result.Merged = []*MRInfo{mr}
 		result.MergeCommit = processResult.MergeCommit
@@ -305,8 +325,8 @@ func (e *Engineer) processSingleMR(ctx context.Context, mr *MRInfo, target strin
 		e.HandleMRInfoFailure(mr, processResult)
 		result.Conflicts = []*MRInfo{mr}
 	} else if processResult.NoMerge {
-		// Source issue has no_merge flag — intentionally blocked. Dequeue silently.
-		_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: no_merge flag set, dequeuing\n", mr.ID)
+		// Policy-ineligible work is intentionally blocked. Dequeue silently.
+		_, _ = fmt.Fprintf(e.output, "[Batch] MR %s: not merge-eligible, dequeuing\n", mr.ID)
 		e.HandleMRInfoFailure(mr, processResult)
 	} else if processResult.NeedsApproval {
 		// PR awaiting human approval — leave in queue for retry on next poll.
@@ -384,6 +404,21 @@ func (e *Engineer) fastForwardBatch(ctx context.Context, stacked []*MRInfo, targ
 				}
 			}
 		}()
+	}
+
+	for _, mr := range stacked {
+		if eligibility := e.recheckMRStillMergeable(mr, target); !eligibility.Success {
+			if resetErr := e.git.ResetHard("origin/" + target); resetErr != nil {
+				_, _ = fmt.Fprintf(e.output, "[Batch] Warning: failed to reset %s after pre-push eligibility failure: %v\n", target, resetErr)
+			}
+			if eligibility.NoMerge {
+				_, _ = fmt.Fprintf(e.output, "[Batch] MR %s became ineligible before push: %s\n", mr.ID, eligibility.Error)
+				e.HandleMRInfoFailure(mr, eligibility)
+			} else {
+				result.Error = fmt.Errorf("pre-push eligibility recheck failed for %s: %s", mr.ID, eligibility.Error)
+			}
+			return result
+		}
 	}
 
 	// Push to origin

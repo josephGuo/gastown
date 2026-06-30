@@ -65,6 +65,7 @@ func runMQNext(cmd *cobra.Command, args []string) error {
 		Label:    "gt:merge-request",
 		Status:   "open",
 		Priority: -1, // No priority filter
+		Rig:      rigName,
 	}
 
 	issues, err := b.ListMergeRequests(opts)
@@ -75,11 +76,7 @@ func runMQNext(cmd *cobra.Command, args []string) error {
 	// Filter to only ready MRs (no blockers)
 	var ready []*beads.Issue
 	for _, issue := range issues {
-		// Skip closed MRs (workaround for bd list not respecting --status filter)
-		if issue.Status != "open" {
-			continue
-		}
-		if len(issue.BlockedBy) == 0 && issue.BlockedByCount == 0 {
+		if isMergeRequestReadyForSelection(issue) {
 			ready = append(ready, issue)
 		}
 	}
