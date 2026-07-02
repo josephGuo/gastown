@@ -1,6 +1,7 @@
 package polecat
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -803,6 +804,92 @@ func TestReconcilePoolWith(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReconcilePoolWith_KeepsDirBackedStaleSession(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("tmux not supported on Windows")
+	}
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "myrig")
+	tm := tmux.NewTmuxWithSocket(fmt.Sprintf("gt-test-reconcile-%d", time.Now().UnixNano()))
+	t.Cleanup(func() { _ = tm.KillServer() })
+
+	m := NewManager(&rig.Rig{Name: "myrig", Path: rigPath}, nil, tm)
+	activeName := "toast"
+	orphanName := "nux"
+	activeSession := session.PolecatSessionName(session.PrefixFor("myrig"), activeName)
+	orphanSession := session.PolecatSessionName(session.PrefixFor("myrig"), orphanName)
+
+	for _, sessionName := range []string{activeSession, orphanSession} {
+		if err := tm.NewSessionWithCommand(sessionName, townRoot, "sleep 300"); err != nil {
+			t.Fatalf("create tmux session %s: %v", sessionName, err)
+		}
+	}
+
+	writeStaleHeartbeat := func(sessionName string) {
+		t.Helper()
+		if err := os.MkdirAll(heartbeatsDir(townRoot), 0755); err != nil {
+			t.Fatalf("mkdir heartbeats: %v", err)
+		}
+		data, err := json.Marshal(SessionHeartbeat{
+			Timestamp: time.Now().Add(-SessionHeartbeatStaleThreshold - time.Minute).UTC(),
+			State:     HeartbeatWorking,
+		})
+		if err != nil {
+			t.Fatalf("marshal heartbeat: %v", err)
+		}
+		if err := os.WriteFile(heartbeatFile(townRoot, sessionName), data, 0644); err != nil {
+			t.Fatalf("write heartbeat %s: %v", sessionName, err)
+		}
+	}
+	writeStaleHeartbeat(activeSession)
+	writeStaleHeartbeat(orphanSession)
+
+	m.ReconcilePoolWith([]string{activeName}, []string{activeName, orphanName})
+
+	running, err := tm.HasSession(activeSession)
+	if err != nil {
+		t.Fatalf("check active session: %v", err)
+	}
+	if !running {
+		t.Fatalf("dir-backed stale session %s should survive reconciliation", activeSession)
+	}
+	if hb := ReadSessionHeartbeat(townRoot, activeSession); hb == nil {
+		t.Fatalf("dir-backed stale session heartbeat should survive reconciliation")
+	}
+
+	running, err = tm.HasSession(orphanSession)
+	if err != nil {
+		t.Fatalf("check orphan session: %v", err)
+	}
+	if running {
+		t.Fatalf("orphan session %s should be killed by reconciliation", orphanSession)
+	}
+	if hb := ReadSessionHeartbeat(townRoot, orphanSession); hb != nil {
+		t.Fatalf("orphan session heartbeat should be removed")
+	}
+
+	activeNames := m.namePool.ActiveNames()
+	if !containsString(activeNames, activeName) {
+		t.Fatalf("dir-backed name %q should remain in use; active names: %v", activeName, activeNames)
+	}
+	if containsString(activeNames, orphanName) {
+		t.Fatalf("orphan name %q should not remain in use; active names: %v", orphanName, activeNames)
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 // TestReconcilePoolWith_Allocation verifies that allocation respects reconciled state.

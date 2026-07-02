@@ -1878,8 +1878,8 @@ func (m *Manager) killExistingPolecatSession(name, action string) error {
 // This implements ZFC: InUse is discovered from filesystem and tmux, not tracked separately.
 // Called before each allocation to ensure InUse reflects reality.
 //
-// In addition to directory checks, this also:
-// - Kills orphaned tmux sessions (sessions without directories are broken)
+// In addition to directory checks, this also kills orphaned tmux sessions
+// (sessions without directories are broken).
 func (m *Manager) ReconcilePool() {
 	fl, err := m.lockPool()
 	if err != nil {
@@ -1952,9 +1952,9 @@ func (m *Manager) ReconcilePoolWith(namesWithDirs, namesWithSessions []string) {
 		dirSet[name] = true
 	}
 
-	// Kill orphaned or stale sessions.
+	// Kill orphaned sessions only. Directory-backed sessions are lifecycle-owned by
+	// their polecat/witness paths; allocation must never reap unrelated workers.
 	// - No directory: orphan session, always kill (worktree was removed but tmux lingered)
-	// - Has directory but dead process: stale session from crashed startup (gt-jn40ft)
 	// Use KillSessionWithProcesses to ensure all descendant processes are killed.
 	if m.tmux != nil {
 		townRoot := filepath.Dir(m.rig.Path)
@@ -1962,10 +1962,6 @@ func (m *Manager) ReconcilePoolWith(namesWithDirs, namesWithSessions []string) {
 			sessionName := session.PolecatSessionName(session.PrefixFor(m.rig.Name), name)
 			if !dirSet[name] {
 				// Orphan: session exists but no directory
-				_ = m.tmux.KillSessionWithProcesses(sessionName)
-				RemoveSessionHeartbeat(townRoot, sessionName)
-			} else if isSessionProcessDead(m.tmux, sessionName, townRoot) {
-				// Stale: directory exists but session's process has died
 				_ = m.tmux.KillSessionWithProcesses(sessionName)
 				RemoveSessionHeartbeat(townRoot, sessionName)
 			}
