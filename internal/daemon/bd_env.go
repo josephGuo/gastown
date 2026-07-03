@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	agentconfig "github.com/steveyegge/gastown/internal/config"
 )
 
 // bdReadOnlyEnv returns an environment slice for read-only bd/gt subprocess
@@ -24,20 +25,28 @@ func bdReadOnlyEnv() []string {
 
 func bdReadOnlyRoutingEnv(townRoot string) []string {
 	fallback := ""
+	base := os.Environ()
 	if townRoot != "" {
 		fallback = filepath.Join(townRoot, ".beads")
+		base = agentconfig.NormalizeConfiguredDoltEnv(base, townRoot)
 	}
-	return beads.BuildReadOnlyRoutingBDEnv(os.Environ(), fallback)
+	return beads.BuildReadOnlyRoutingBDEnv(base, fallback)
 }
 
 func bdMutationRoutingEnv(townRoot string) []string {
 	fallback := ""
+	base := os.Environ()
 	if townRoot != "" {
 		fallback = filepath.Join(townRoot, ".beads")
+		base = agentconfig.NormalizeConfiguredDoltEnv(base, townRoot)
 	}
-	return beads.BuildMutationRoutingBDEnv(os.Environ(), fallback)
+	return beads.BuildMutationRoutingBDEnv(base, fallback)
 }
 
 func bdReadOnlyPinnedEnv(beadsDir string) []string {
-	return beads.BuildReadOnlyPinnedBDEnv(os.Environ(), beadsDir)
+	base := os.Environ()
+	if townRoot := beads.FindTownRoot(filepath.Dir(beads.ResolveBeadsDir(beadsDir))); townRoot != "" {
+		base = agentconfig.NormalizeConfiguredDoltEnv(base, townRoot)
+	}
+	return beads.BuildReadOnlyPinnedBDEnv(base, beadsDir)
 }

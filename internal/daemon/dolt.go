@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
@@ -162,11 +163,26 @@ func NewDoltServerManager(townRoot string, config *DoltServerConfig, logger func
 	if config == nil {
 		config = DefaultDoltServerConfig(townRoot)
 	}
+	config = normalizeDoltServerConfig(townRoot, config)
 	return &DoltServerManager{
 		config:   config,
 		townRoot: townRoot,
 		logger:   logger,
 	}
+}
+
+func normalizeDoltServerConfig(townRoot string, config *DoltServerConfig) *DoltServerConfig {
+	if config == nil {
+		return nil
+	}
+	normalized := *config
+	if host, port, ok := agentconfig.ManagedDoltEndpoint(townRoot); ok {
+		normalized.Host = host
+		if port > 0 {
+			normalized.Port = port
+		}
+	}
+	return &normalized
 }
 
 // SetRecoveryCallback registers fn to be called (in a goroutine) whenever Dolt

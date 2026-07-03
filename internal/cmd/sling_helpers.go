@@ -220,6 +220,66 @@ func collectExistingMolecules(info *beadInfo) []string {
 	return molecules
 }
 
+func appendUniqueMolecules(molecules []string, extras ...string) []string {
+	seen := make(map[string]bool, len(molecules)+len(extras))
+	for _, molecule := range molecules {
+		seen[molecule] = true
+	}
+	for _, molecule := range extras {
+		if molecule == "" || seen[molecule] {
+			continue
+		}
+		seen[molecule] = true
+		molecules = append(molecules, molecule)
+	}
+	return molecules
+}
+
+func collectExistingMoleculesForBead(info *beadInfo, beadID, townRoot string) ([]string, error) {
+	molecules := collectExistingMolecules(info)
+	deps, err := collectExistingMoleculeDeps(beadID, townRoot)
+	if err != nil {
+		return molecules, err
+	}
+	return appendUniqueMolecules(molecules, deps...), nil
+}
+
+func collectExistingMoleculeDeps(beadID, townRoot string) ([]string, error) {
+	if beadID == "" {
+		return nil, nil
+	}
+	if !isValidBeadID(beadID) {
+		return nil, fmt.Errorf("invalid bead ID: %q", beadID)
+	}
+
+	dir := resolveBeadDirFromTownRoot(townRoot, beadID)
+	query := fmt.Sprintf(`SELECT DISTINCT wisp_dependencies.issue_id FROM wisp_dependencies JOIN wisps ON wisps.id = wisp_dependencies.issue_id WHERE wisps.issue_type = 'molecule' AND wisps.status NOT IN ('closed', 'tombstone') AND wisp_dependencies.type IN ('blocks', 'conditional-blocks', 'parent-child') AND (wisp_dependencies.depends_on_issue_id = '%[1]s' OR wisp_dependencies.depends_on_wisp_id = '%[1]s' OR wisp_dependencies.depends_on_external = '%[1]s' OR %[2]s)`, beadID, sqlExternalDepTargetClause(beadID))
+	out, err := runBdJSON(dir, "sql", query, "--json")
+	if err != nil {
+		return nil, err
+	}
+	if len(strings.TrimSpace(string(out))) == 0 {
+		return nil, nil
+	}
+
+	var rows []map[string]string
+	if err := json.Unmarshal(out, &rows); err != nil {
+		return nil, fmt.Errorf("parsing canonical molecule deps for %s: %w", beadID, err)
+	}
+
+	seen := make(map[string]bool, len(rows))
+	var molecules []string
+	for _, row := range rows {
+		moleculeID := row["issue_id"]
+		if moleculeID == "" || seen[moleculeID] {
+			continue
+		}
+		seen[moleculeID] = true
+		molecules = append(molecules, moleculeID)
+	}
+	return molecules, nil
+}
+
 // burnExistingMolecules burns all molecule wisps attached to a bead.
 // Order: force-close descendants → detach from bead → remove dep bonds → force-close roots.
 // Matches nukeCleanupMolecules pattern. Returns an error if detach fails, since
@@ -266,13 +326,7 @@ func burnExistingMolecules(molecules []string, beadID, townRoot string) error {
 	// Without this, the next sling attempt finds the closed molecule via the
 	// bond and refuses with "bead has existing molecule(s)".
 	for _, molID := range molecules {
-		if err := bd.RemoveDependency(beadID, molID); err != nil {
-			fmt.Printf("  %s Could not remove dep bond %s → %s: %v\n",
-				style.Dim.Render("Warning:"), beadID, molID, err)
-			// Non-fatal: the detach already cleared the description pointer.
-			// The bond is stale metadata that won't cause functional issues
-			// beyond the "existing molecule(s)" check, which uses --force.
-		}
+		removeMoleculeBonds(bd, beadID, molID)
 	}
 
 	// Step 4: Close descendants, then force-close the orphaned wisp roots.
@@ -290,6 +344,32 @@ func burnExistingMolecules(molecules []string, beadID, townRoot string) error {
 	}
 
 	return nil
+}
+
+func removeMoleculeBonds(bd *beads.Beads, beadID, molID string) {
+	for _, bond := range []struct {
+		from string
+		to   string
+	}{
+		{from: molID, to: beadID}, // canonical bd mol bond direction
+		{from: beadID, to: molID}, // legacy reverse direction
+	} {
+		if err := bd.RemoveDependency(bond.from, bond.to); err != nil && !dependencyRemovalMissing(err) {
+			fmt.Printf("  %s Could not remove dep bond %s → %s: %v\n",
+				style.Dim.Render("Warning:"), bond.from, bond.to, err)
+		}
+	}
+}
+
+func dependencyRemovalMissing(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "not found") ||
+		strings.Contains(msg, "does not exist") ||
+		strings.Contains(msg, "no dependency") ||
+		strings.Contains(msg, "not present")
 }
 
 // verifyBeadExists checks that the bead exists using bd show.
@@ -460,6 +540,8 @@ type beadFieldUpdates struct {
 	Vars             []string // Formula variables (key=value pairs)
 	AttachedMolecule string   // Wisp root ID
 	AttachedFormula  string   // Formula name (e.g., "mol-polecat-work") for inline step display
+	ClearAttachment  bool     // Clear stale workflow attachment fields before applying updates
+	AttachedAt       string   // Assignment timestamp; refreshed when workflow metadata is written
 	NoMerge          bool     // Skip merge queue on completion
 	ReviewOnly       bool     // Review-only mode: assignee must not merge/commit/push
 	Mode             *string  // Execution mode: nil means unchanged, "" clears, "ralph" enables Ralph mode
@@ -483,7 +565,7 @@ func buildSlingFieldUpdates(
 	mergeStrategy string,
 	convoyOwned bool,
 ) beadFieldUpdates {
-	return beadFieldUpdates{
+	updates := beadFieldUpdates{
 		Dispatcher:       dispatcher,
 		Args:             args,
 		Vars:             vars,
@@ -497,6 +579,10 @@ func buildSlingFieldUpdates(
 		ConvoyOwned:      convoyOwned,
 		FormulaVars:      formulaVars,
 	}
+	if attachedMolecule != "" || attachedFormula != "" || noMerge || reviewOnly {
+		updates.AttachedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	return updates
 }
 
 // storeFieldsInBead performs a single read-modify-write to update all attachment fields
@@ -538,6 +624,13 @@ func storeFieldsInBeadFromTownRoot(townRoot, beadID string, updates beadFieldUpd
 	}
 
 	// Apply all updates in one pass
+	if updates.ClearAttachment {
+		fields.AttachedMolecule = ""
+		fields.AttachedFormula = ""
+		fields.AttachedAt = ""
+		fields.AttachedVars = nil
+		fields.FormulaVars = ""
+	}
 	if updates.Dispatcher != "" {
 		fields.DispatchedBy = updates.Dispatcher
 	}
@@ -553,7 +646,9 @@ func storeFieldsInBeadFromTownRoot(townRoot, beadID string, updates beadFieldUpd
 	if updates.AttachedFormula != "" {
 		fields.AttachedFormula = updates.AttachedFormula
 	}
-	if (updates.AttachedMolecule != "" || updates.AttachedFormula != "") && fields.AttachedAt == "" {
+	if updates.AttachedAt != "" {
+		fields.AttachedAt = updates.AttachedAt
+	} else if updates.AttachedMolecule != "" || updates.AttachedFormula != "" || updates.NoMerge || updates.ReviewOnly {
 		fields.AttachedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	}
 	if updates.NoMerge {
@@ -912,7 +1007,7 @@ type FormulaOnBeadResult struct {
 	FormulaVars []string // Vars used to instantiate/render the formula
 }
 
-// InstantiateFormulaOnBead creates a wisp from a formula, bonds it to a bead.
+// InstantiateFormulaOnBead bonds a formula directly to a bead.
 // This is the formula-on-bead pattern used by issue #288 for auto-applying mol-polecat-work.
 //
 // Parameters:
@@ -924,10 +1019,10 @@ type FormulaOnBeadResult struct {
 //   - skipCook: if true, skip cooking (for batch mode optimization where cook happens once)
 //   - extraVars: additional --var values supplied by the user
 //
-// Returns the wisp root ID which should be hooked.
+// Returns the spawned molecule root ID while leaving the base bead as the hook target.
 func InstantiateFormulaOnBead(ctx context.Context, formulaName, beadID, title, hookWorkDir, townRoot string, skipCook bool, extraVars []string) (_ *FormulaOnBeadResult, retErr error) {
 	defer func() { telemetry.RecordFormulaInstantiate(ctx, formulaName, beadID, retErr) }()
-	// Route bd mutations (wisp/bond) to the correct beads context for the target bead.
+	// Route bd mutations to the correct beads context for the target bead.
 	formulaWorkDir := beads.ResolveHookDir(townRoot, beadID, hookWorkDir)
 
 	// Step 1: Cook the formula (ensures proto exists)
@@ -964,95 +1059,12 @@ func InstantiateFormulaOnBead(ctx context.Context, formulaName, beadID, title, h
 		telemetry.RecordMolCook(ctx, formulaName, nil)
 	}
 
-	// Build variable list once so both legacy and fallback paths use
-	// identical formula inputs.
-	featureVar := fmt.Sprintf("feature=%s", title)
-	issueVar := fmt.Sprintf("issue=%s", beadID)
-	formulaVars := []string{featureVar, issueVar}
-	formulaVars = append(formulaVars, extraVars...)
-	formulaVars = ensureFormulaRequiredVars(formulaName, formulaVars)
-
-	// Step 2: Create wisp with feature and issue variables from bead.
-	// Use resolvedFormula which may be a temp file path if the embedded fallback was used.
-	// Root-only: don't materialize child step wisps — agents read inline steps from embedded formula.
-	wispArgs := []string{"mol", "wisp", resolvedFormula, "--var", featureVar, "--var", issueVar}
-	for _, variable := range extraVars {
-		wispArgs = append(wispArgs, "--var", variable)
-	}
-	wispArgs = append(wispArgs, "--json")
-	wispOut, err := BdCmd(wispArgs...).
-		Dir(formulaWorkDir).
-		WithAutoCommit().
-		WithGTRoot(townRoot).
-		Output()
+	formulaVars := formulaVarsForBead(formulaName, beadID, title, extraVars)
+	wispRootID, err := bondFormulaDirect(resolvedFormula, formulaName, beadID, formulaWorkDir, townRoot, formulaVars)
 	if err != nil {
-		return nil, fmt.Errorf("creating wisp for formula %s: %w", formulaName, err)
-	}
-
-	// Parse wisp output to get the root ID
-	wispRootID, err := parseWispIDFromJSON(wispOut)
-	if err != nil {
-		telemetry.RecordMolWisp(ctx, formulaName, "", beadID, err)
-		return nil, fmt.Errorf("parsing wisp output: %w", err)
+		return nil, fmt.Errorf("bonding formula %s to bead %s: %w", formulaName, beadID, err)
 	}
 	telemetry.RecordMolWisp(ctx, formulaName, wispRootID, beadID, nil)
-
-	// Step 3: Bond wisp to original bead (creates compound).
-	//
-	// Compatibility fallback:
-	// Some bd versions return a wisp ID from `mol wisp` that is not bond-resolvable
-	// ("<id> not found"), while direct formula->bead bond still works. If legacy
-	// wisp->bead bond fails, retry with direct formula bond in ephemeral mode.
-	//
-	// gt-4gjd: Warn about malformed wisp IDs (e.g., doubled "-wisp-" like "oag-wisp-wisp-rsia")
-	// but proceed — they are valid in the DB and bond correctly. The bd-side fix is ef57293e
-	// (not yet released).
-	if isMalformedWispID(wispRootID) {
-		fmt.Fprintf(os.Stderr, "Warning: bd mol wisp returned malformed ID %q (known bd bug, proceeding with bond)\n", wispRootID)
-	}
-
-	bondArgs := []string{"mol", "bond", wispRootID, beadID, "--json"}
-	bondOut, err := BdCmd(bondArgs...).
-		Dir(formulaWorkDir).
-		WithAutoCommit().
-		WithGTRoot(townRoot).
-		Output()
-	if err != nil {
-		// Clean up orphaned wisp from the failed legacy path.
-		cleanupOrphanedWisp(wispRootID, formulaWorkDir)
-
-		fallbackRootID, fallbackErr := bondFormulaDirect(resolvedFormula, beadID, formulaWorkDir, townRoot, formulaVars)
-		if fallbackErr != nil {
-			return nil, fmt.Errorf("bonding formula to bead: %w (direct formula bond fallback failed: %v)", err, fallbackErr)
-		}
-		return &FormulaOnBeadResult{
-			WispRootID:  fallbackRootID,
-			BeadToHook:  beadID, // Hook the BASE bead (lifecycle fix: wisp is attached_molecule)
-			FormulaVars: append([]string(nil), formulaVars...),
-		}, nil
-	}
-
-	// Parse bond output - the wisp root becomes the compound root.
-	// Some environments may return success with non-JSON/empty stdout while
-	// still writing an error to stderr. If parsing fails, retry direct bond.
-	parsedRootID, parsed := parseBondSpawnRootIDWithStatus(bondOut, formulaName, beadID, wispRootID)
-	if !parsed {
-		// gt-4gjd: Clean up orphaned wisp before fallback.
-		cleanupOrphanedWisp(wispRootID, formulaWorkDir)
-
-		fallbackRootID, fallbackErr := bondFormulaDirect(resolvedFormula, beadID, formulaWorkDir, townRoot, formulaVars)
-		if fallbackErr != nil {
-			return nil, fmt.Errorf("bond output not parseable and direct formula bond fallback failed: %v", fallbackErr)
-		}
-		return &FormulaOnBeadResult{
-			WispRootID:  fallbackRootID,
-			BeadToHook:  beadID, // Hook the BASE bead (lifecycle fix: wisp is attached_molecule)
-			FormulaVars: append([]string(nil), formulaVars...),
-		}, nil
-	}
-	if parsedRootID != "" {
-		wispRootID = parsedRootID
-	}
 
 	return &FormulaOnBeadResult{
 		WispRootID:  wispRootID,
@@ -1061,11 +1073,18 @@ func InstantiateFormulaOnBead(ctx context.Context, formulaName, beadID, title, h
 	}, nil
 }
 
-// bondFormulaDirect retries formula attachment using direct formula->bead bond.
-// Newer bd versions support this polymorphic path even when legacy wisp->bead
-// bonding fails with "not found" for the generated wisp ID.
-func bondFormulaDirect(formulaName, beadID, formulaWorkDir, townRoot string, vars []string) (string, error) {
-	bondArgs := []string{"mol", "bond", formulaName, beadID, "--json", "--ephemeral"}
+func formulaVarsForBead(formulaName, beadID, title string, extraVars []string) []string {
+	formulaVars := []string{
+		fmt.Sprintf("feature=%s", title),
+		fmt.Sprintf("issue=%s", beadID),
+	}
+	formulaVars = append(formulaVars, extraVars...)
+	return ensureFormulaRequiredVars(formulaName, formulaVars)
+}
+
+// bondFormulaDirect attaches a formula to a bead through bd's canonical bond path.
+func bondFormulaDirect(bondTarget, formulaName, beadID, formulaWorkDir, townRoot string, vars []string) (string, error) {
+	bondArgs := []string{"mol", "bond", bondTarget, beadID, "--json", "--ephemeral"}
 	for _, variable := range vars {
 		bondArgs = append(bondArgs, "--var", variable)
 	}
@@ -1111,6 +1130,20 @@ func parseBondSpawnRootIDWithStatus(bondOut []byte, formulaName, beadID, fallbac
 			if mappedID := bondResult.IDMapping["mol-"+formulaName]; mappedID != "" {
 				return mappedID, true
 			}
+		}
+		var onlySpawned string
+		for _, mappedID := range bondResult.IDMapping {
+			if mappedID == "" || mappedID == beadID {
+				continue
+			}
+			if onlySpawned != "" && onlySpawned != mappedID {
+				onlySpawned = ""
+				break
+			}
+			onlySpawned = mappedID
+		}
+		if onlySpawned != "" {
+			return onlySpawned, true
 		}
 	}
 
@@ -1422,32 +1455,6 @@ func shouldAcceptPermissionWarning(agentName string) bool {
 		return false
 	}
 	return preset.EmitsPermissionWarning
-}
-
-// isMalformedWispID detects obviously malformed wisp IDs from bd mol wisp output.
-// Known bd bug (gt-4gjd): some versions generate wisp IDs with doubled "-wisp-"
-// infix (e.g., "oag-wisp-wisp-rsia" instead of "oag-wisp-rsia"). Detecting these
-// early avoids a doomed bond attempt and the associated noisy error.
-func isMalformedWispID(wispID string) bool {
-	// Look for "wisp-wisp-" anywhere in the ID — the hallmark of the doubled-infix bug.
-	return strings.Contains(wispID, "wisp-wisp-")
-}
-
-// cleanupOrphanedWisp attempts to force-close a wisp that was created by
-// bd mol wisp but could not be bonded. This prevents orphaned wisp accumulation
-// when the legacy bond path fails and the direct-bond fallback is used (gt-4gjd).
-// Best-effort: errors are logged but not propagated.
-func cleanupOrphanedWisp(wispID, formulaWorkDir string) {
-	if wispID == "" {
-		return
-	}
-	bd := beads.New(formulaWorkDir)
-	if err := bd.ForceCloseWithReason("burned: orphaned wisp from failed bond (gt-4gjd)", wispID); err != nil {
-		// Non-fatal: the wisp may not exist (phantom ID from bd bug),
-		// or it may be in a different database. Orphaned wisps will be
-		// caught by the doctor's DetectOrphanedMolecules.
-		fmt.Fprintf(os.Stderr, "Warning: could not clean up orphaned wisp %s: %v\n", wispID, err)
-	}
 }
 
 // updateAgentMode updates the mode field on the agent bead.

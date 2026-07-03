@@ -625,8 +625,7 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 			// Always pass --server-port so bd connects to gt's central Dolt
 			// server. Without this, bd auto-starts its own server on a random
 			// port, causing "database not found" errors. (GH #2405)
-			doltCfg := doltserver.DefaultConfig(m.townRoot)
-			initArgs = append(initArgs, "--server-port", strconv.Itoa(doltCfg.Port))
+			initArgs = append(initArgs, "--server-port", strconv.Itoa(bdInitServerPort(m.townRoot)))
 			// If the cloned repo's config.yaml has sync.remote, bd init blocks
 			// waiting for interactive confirmation (stdin is /dev/null here).
 			// Pass explicit flags to bypass the safety check. (GH #3873)
@@ -1156,45 +1155,9 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 		return err
 	}
 
-	// Build environment with explicit BEADS_DIR to prevent bd from
-	// finding a parent directory's .beads/ database
-	env := os.Environ()
-	filteredEnv := make([]string, 0, len(env)+2)
-	for _, e := range env {
-		if !strings.HasPrefix(e, "BEADS_DIR=") && !strings.HasPrefix(e, "BEADS_DB=") && !strings.HasPrefix(e, "BEADS_DOLT_SERVER_DATABASE=") {
-			filteredEnv = append(filteredEnv, e)
-		}
-	}
-	filteredEnv = append(filteredEnv, "BEADS_DIR="+beadsDir)
-	if rigName != "" {
-		filteredEnv = append(filteredEnv, "BEADS_DOLT_SERVER_DATABASE="+rigName)
-	}
-
-	// Ensure BEADS_DOLT_PORT and BEADS_DOLT_SERVER_HOST are set when their GT_
-	// counterparts are present, so that bd subprocesses connect to the correct
-	// Dolt server (especially in tests or when the server is remote).
-	var gtDoltPort, gtDoltHost string
-	hasBDP, hasBDH := false, false
-	for _, e := range filteredEnv {
-		if strings.HasPrefix(e, "GT_DOLT_PORT=") {
-			gtDoltPort = strings.TrimPrefix(e, "GT_DOLT_PORT=")
-		}
-		if strings.HasPrefix(e, "GT_DOLT_HOST=") {
-			gtDoltHost = strings.TrimPrefix(e, "GT_DOLT_HOST=")
-		}
-		if strings.HasPrefix(e, "BEADS_DOLT_PORT=") {
-			hasBDP = true
-		}
-		if strings.HasPrefix(e, "BEADS_DOLT_SERVER_HOST=") {
-			hasBDH = true
-		}
-	}
-	if gtDoltPort != "" && !hasBDP {
-		filteredEnv = append(filteredEnv, "BEADS_DOLT_PORT="+gtDoltPort)
-	}
-	if gtDoltHost != "" && !hasBDH {
-		filteredEnv = append(filteredEnv, "BEADS_DOLT_SERVER_HOST="+gtDoltHost)
-	}
+	// Pin bd to the intended .beads directory/database through the shared
+	// hardened env builder so stale shell selectors cannot leak into rig init.
+	filteredEnv := bdSubprocessEnv(beadsDir, rigName)
 
 	// Run bd init if available (Dolt is the only backend since bd v0.51.0).
 	// --server tells bd to set dolt_mode=server in metadata.json so bd
@@ -1209,8 +1172,7 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 	initArgs = append(initArgs, "--server")
 	// Always pass --server-port so bd connects to gt's central Dolt server.
 	// Without this, bd auto-starts its own server on a random port. (GH #2405)
-	doltCfg := doltserver.DefaultConfig(m.townRoot)
-	initArgs = append(initArgs, "--server-port", strconv.Itoa(doltCfg.Port))
+	initArgs = append(initArgs, "--server-port", strconv.Itoa(bdInitServerPort(m.townRoot)))
 	// --force ensures bd 1.0+ persists issue_prefix on existing server-side DBs.
 	initArgs = append(initArgs, "--force")
 	cmd := exec.Command("bd", initArgs...)
@@ -1495,20 +1457,23 @@ func isValidBeadsPrefix(prefix string) bool {
 }
 
 func bdSubprocessEnv(beadsDir, database string) []string {
-	env := make([]string, 0, len(os.Environ())+2)
-	for _, e := range os.Environ() {
-		if strings.HasPrefix(e, "BEADS_DIR=") || strings.HasPrefix(e, "BEADS_DB=") || strings.HasPrefix(e, "BEADS_DOLT_SERVER_DATABASE=") {
-			continue
-		}
-		env = append(env, e)
+	base := os.Environ()
+	if townRoot := beads.FindTownRoot(filepath.Dir(beads.ResolveBeadsDir(beadsDir))); townRoot != "" {
+		base = config.NormalizeConfiguredDoltEnv(base, townRoot)
 	}
-	if beadsDir != "" {
-		env = append(env, "BEADS_DIR="+beadsDir)
-	}
+	env := beads.BuildMutationPinnedBDEnv(base, beadsDir)
 	if database != "" {
+		env = beads.StripEnvKey(env, "BEADS_DOLT_SERVER_DATABASE")
 		env = append(env, "BEADS_DOLT_SERVER_DATABASE="+database)
 	}
 	return env
+}
+
+func bdInitServerPort(townRoot string) int {
+	if port := config.ResolveConfiguredDoltPort(townRoot); port > 0 {
+		return port
+	}
+	return doltserver.DefaultPort
 }
 
 // isStandardBeadHash checks if a string looks like a standard 5-char bead hash.

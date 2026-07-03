@@ -2408,6 +2408,39 @@ func TestRuntimeArtifactPaths(t *testing.T) {
 	}
 }
 
+func TestRuntimeArtifactPathspecs(t *testing.T) {
+	got := RuntimeArtifactPathspecs([]string{
+		".beads/redirect",
+		"web/.beads/redirect",
+		"web/.beads/db.sqlite",
+		".opencode/settings.json",
+		"api/.opencode/settings.json",
+		"./.runtime/state.json",
+		"svc/.runtime/state.json",
+		"tools/.claude/settings.json",
+		"src/main.go",
+		"pkg/cache.pyc",
+	})
+	want := []string{
+		".beads/",
+		"web/.beads/",
+		".opencode/",
+		"api/.opencode/",
+		".runtime/",
+		"svc/.runtime/",
+		"tools/.claude/",
+		"pkg/cache.pyc",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("RuntimeArtifactPathspecs() = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("RuntimeArtifactPathspecs()[%d] = %q, want %q (all: %#v)", i, got[i], want[i], got)
+		}
+	}
+}
+
 func TestParsePorcelainStatusEntryPreservesRenameCopySourceAndConflict(t *testing.T) {
 	tests := []struct {
 		name       string

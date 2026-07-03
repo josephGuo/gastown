@@ -615,8 +615,9 @@ func PurgeClosedEphemerals(townRoot, dbName string, dryRun bool) (int, error) {
 	// Build bd purge command with safety-net timeout.
 	// bd purge v2 uses batched SQL (completes in seconds), but we keep a
 	// generous timeout as a circuit breaker against future regressions.
-	// Conditionally use --allow-stale if bd supports it.
-	args := beads.MaybePrependAllowStale([]string{"purge", "--json"})
+	env := beads.BuildMutationPinnedBDEnv(os.Environ(), beadsDir)
+	// Probe --allow-stale support with the same hardened target env used by purge.
+	args := beads.MaybePrependAllowStaleWithEnv(env, []string{"purge", "--json"})
 	if dryRun {
 		args = append(args, "--dry-run")
 	}
@@ -626,7 +627,7 @@ func PurgeClosedEphemerals(townRoot, dbName string, dryRun bool) (int, error) {
 
 	cmd := exec.CommandContext(ctx, "bd", args...)
 	cmd.Dir = filepath.Dir(beadsDir) // run from parent of .beads
-	cmd.Env = append(os.Environ(), "BEADS_DIR="+beadsDir)
+	cmd.Env = env
 	setProcessGroup(cmd)
 
 	var stdout, stderr bytes.Buffer

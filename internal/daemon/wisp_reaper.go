@@ -6,7 +6,9 @@ import (
 	"strings"
 	"time"
 
+	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/reaper"
 	"github.com/steveyegge/gastown/internal/util"
 )
@@ -93,7 +95,6 @@ func (d *Daemon) reapWisps() {
 		"stale_issue_age": defaultStaleIssueAge.String(),
 		"mail_delete_age": defaultMailDeleteAge.String(),
 		"alert_threshold": fmt.Sprintf("%d", wispAlertThreshold),
-		"dolt_port":       fmt.Sprintf("%d", d.doltServerPort()),
 	}
 
 	if config.DryRun {
@@ -130,11 +131,9 @@ func (d *Daemon) dispatchReaperDog(vars map[string]string) error {
 
 	cmd := exec.Command(d.gtPath, args...) //nolint:gosec // G204: d.gtPath resolved at daemon init via LookPath
 	cmd.Dir = d.config.TownRoot
-	// Inherit os.Environ() (cmd.Env left nil) — gt sling performs WRITES
-	// (creates wisps, dispatches dogs) so it must NOT carry
-	// BD_DOLT_AUTO_COMMIT=off from bdReadOnlyEnv(). PATH augmentation at
-	// daemon startup (PATCH-007) ensures the inherited env still finds
-	// gt/bd via os.Environ()'s PATH.
+	// gt sling performs writes, so use mutation routing env: it preserves PATH
+	// while stripping stale bd target selectors and derived Beads endpoint aliases.
+	cmd.Env = bdMutationRoutingEnv(d.config.TownRoot)
 	util.SetDetachedProcessGroup(cmd)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("gt sling: %w", err)
@@ -146,8 +145,9 @@ func (d *Daemon) dispatchReaperDog(vars map[string]string) error {
 // Dog dispatch is unavailable. Delegates to the reaper package for SQL execution.
 func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge time.Duration, mol *dogMol) {
 	databases := config.Databases
+	host := d.doltServerHost()
 	if len(databases) == 0 {
-		databases = reaper.DiscoverDatabases("127.0.0.1", d.doltServerPort())
+		databases = reaper.DiscoverDatabases(host, d.doltServerPort())
 	}
 	if len(databases) == 0 {
 		d.logger.Printf("wisp_reaper: no databases to reap")
@@ -167,7 +167,7 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge tim
 		if err := reaper.ValidateDBName(dbName); err != nil {
 			continue
 		}
-		db, err := reaper.OpenDB("127.0.0.1", port, dbName, 10*time.Second, 10*time.Second)
+		db, err := reaper.OpenDB(host, port, dbName, 10*time.Second, 10*time.Second)
 		if err != nil {
 			d.logger.Printf("wisp_reaper: %s: connect error: %v", dbName, err)
 			reapErrors++
@@ -208,7 +208,7 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge tim
 		if err := reaper.ValidateDBName(dbName); err != nil {
 			continue
 		}
-		db, err := reaper.OpenDB("127.0.0.1", port, dbName, 30*time.Second, 30*time.Second)
+		db, err := reaper.OpenDB(host, port, dbName, 30*time.Second, 30*time.Second)
 		if err != nil {
 			purgeErrors++
 			continue
@@ -243,7 +243,7 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge tim
 		if err := reaper.ValidateDBName(dbName); err != nil {
 			continue
 		}
-		db, err := reaper.OpenDB("127.0.0.1", port, dbName, 10*time.Second, 10*time.Second)
+		db, err := reaper.OpenDB(host, port, dbName, 10*time.Second, 10*time.Second)
 		if err != nil {
 			continue
 		}
@@ -270,7 +270,7 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge tim
 		if err := reaper.ValidateDBName(dbName); err != nil {
 			continue
 		}
-		db, err := reaper.OpenDB("127.0.0.1", port, dbName, 10*time.Second, 10*time.Second)
+		db, err := reaper.OpenDB(host, port, dbName, 10*time.Second, 10*time.Second)
 		if err != nil {
 			continue
 		}
@@ -296,7 +296,7 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge tim
 		if err := reaper.ValidateDBName(dbName); err != nil {
 			continue
 		}
-		db, err := reaper.OpenDB("127.0.0.1", port, dbName, 10*time.Second, 10*time.Second)
+		db, err := reaper.OpenDB(host, port, dbName, 10*time.Second, 10*time.Second)
 		if err != nil {
 			autoCloseErrors++
 			continue
@@ -342,5 +342,21 @@ func (d *Daemon) doltServerPort() int {
 	if d.doltServer != nil {
 		return d.doltServer.config.Port
 	}
-	return 3307
+	if port := agentconfig.ResolveDoltPort(d.config.TownRoot); port > 0 {
+		return port
+	}
+	return doltserver.DefaultPort
+}
+
+func (d *Daemon) doltServerHost() string {
+	if d.doltServer != nil && d.doltServer.config.Host != "" {
+		return d.doltServer.config.Host
+	}
+	if host := agentconfig.ResolveDoltHost(d.config.TownRoot); host != "" {
+		return host
+	}
+	if cfg := doltserver.DefaultConfig(d.config.TownRoot); cfg.Host != "" {
+		return cfg.Host
+	}
+	return "127.0.0.1"
 }

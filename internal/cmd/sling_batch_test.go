@@ -723,11 +723,11 @@ if [ "$cmd" = "--allow-stale" ]; then
   cmd="$1"
 fi
 shift || true
-case "$cmd" in
-  close)
-    printf '%s %s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$cmd" "$*" "$(pwd)" "${BEADS_DIR:-}" "${BEADS_DOLT_SERVER_DATABASE:-}" "${BEADS_DB:-}" "${BD_DB:-}" "${BEADS_DOLT_DATA_DIR:-}" "${BD_DOLT_AUTO_COMMIT:-}" "${BD_READONLY:-}" >> "` + closeLogPath + `"
-    exit 0
-    ;;
+	case "$cmd" in
+	  close)
+	    printf '%s %s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$cmd" "$*" "$(pwd)" "${BEADS_DIR:-}" "${BEADS_DOLT_SERVER_DATABASE:-}" "${BEADS_DB:-}" "${BD_DB:-}" "${BEADS_DOLT_DATA_DIR:-}" "${GT_DOLT_DATA:-}" "${BD_DOLT_AUTO_COMMIT:-}" "${BD_READONLY:-}" >> "` + closeLogPath + `"
+	    exit 0
+	    ;;
 esac
 exit 0
 `
@@ -742,6 +742,7 @@ exit 0
 	t.Setenv("BEADS_DB", filepath.Join(townRoot, "wrong.db"))
 	t.Setenv("BD_DB", filepath.Join(townRoot, "wrong.bd"))
 	t.Setenv("BEADS_DOLT_DATA_DIR", filepath.Join(townRoot, "wrong-data"))
+	t.Setenv("GT_DOLT_DATA", filepath.Join(townRoot, "wrong-gt-data"))
 	t.Setenv("BD_READONLY", "true")
 	t.Setenv("BD_DOLT_AUTO_COMMIT", "off")
 
@@ -770,8 +771,8 @@ exit 0
 		t.Errorf("close log should contain failure reason:\n%s", closeContent)
 	}
 	fields := strings.Split(strings.TrimSpace(closeContent), "|")
-	if len(fields) != 9 {
-		t.Fatalf("close log fields = %v, want 9 fields in %q", fields, closeContent)
+	if len(fields) != 10 {
+		t.Fatalf("close log fields = %v, want 10 fields in %q", fields, closeContent)
 	}
 	if fields[1] != townBeads {
 		t.Fatalf("close cwd = %q, want town beads dir %q", fields[1], townBeads)
@@ -785,11 +786,14 @@ exit 0
 	if fields[4] != "" || fields[5] != "" || fields[6] != "" {
 		t.Fatalf("stale DB env should be stripped, got BEADS_DB=%q BD_DB=%q BEADS_DOLT_DATA_DIR=%q", fields[4], fields[5], fields[6])
 	}
-	if fields[7] != "on" {
-		t.Fatalf("BD_DOLT_AUTO_COMMIT = %q, want on", fields[7])
+	if fields[7] != "" {
+		t.Fatalf("GT_DOLT_DATA should be stripped, got %q", fields[7])
 	}
-	if fields[8] != "" {
-		t.Fatalf("BD_READONLY should be stripped, got %q", fields[8])
+	if fields[8] != "on" {
+		t.Fatalf("BD_DOLT_AUTO_COMMIT = %q, want on", fields[8])
+	}
+	if fields[9] != "" {
+		t.Fatalf("BD_READONLY should be stripped, got %q", fields[9])
 	}
 }
 

@@ -50,9 +50,8 @@ import (
 	beadssdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/config"
+	configpkg "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/style"
-	"gopkg.in/yaml.v3"
 )
 
 // EnsureDoltIdentity configures dolt global identity (user.name, user.email)
@@ -177,30 +176,6 @@ const (
 	DefaultTimeZone = "+00:00"
 )
 
-// doltConfigYAML represents the subset of Dolt's config.yaml that we need to read.
-type doltConfigYAML struct {
-	Listener struct {
-		Port int `yaml:"port"`
-	} `yaml:"listener"`
-}
-
-// readPortFromConfigYAML reads the port from .dolt-data/config.yaml if it exists.
-// Returns the configured port, or 0 if the file doesn't exist or doesn't specify a port.
-func readPortFromConfigYAML(townRoot string) int {
-	configPath := filepath.Join(townRoot, ".dolt-data", "config.yaml")
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return 0 // File doesn't exist or can't be read
-	}
-
-	var cfg doltConfigYAML
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return 0 // Invalid YAML or doesn't match structure
-	}
-
-	return cfg.Listener.Port // 0 if not specified
-}
-
 // metadataMu provides per-path mutexes for EnsureMetadata goroutine synchronization.
 // flock is inter-process only and cannot reliably synchronize goroutines within the
 // same process (the same process may acquire the same flock twice without blocking).
@@ -291,13 +266,9 @@ type Config struct {
 
 // DefaultConfig returns the default Dolt server configuration.
 //
-// Port priority (highest to lowest):
-//  1. .dolt-data/config.yaml listener.port (authoritative file-based config)
-//  2. GT_DOLT_PORT environment variable (for overrides)
-//  3. DefaultPort (3307)
-//
-// This ordering prevents stale environment variables in long-running sessions
-// from overriding the intended configuration.
+// Port priority is resolved by config.ResolveDoltPort so client and server
+// callsites share one precedence model: explicit env, durable config, daemon
+// env, then DefaultPort.
 //
 // Other environment variables:
 //   - GT_DOLT_HOST → Host
@@ -341,27 +312,12 @@ func DefaultConfig(townRoot string) *Config {
 		config.TimeZone = v
 	}
 
-	if h := os.Getenv("GT_DOLT_HOST"); h != "" {
+	if h := configpkg.ResolveDoltHost(townRoot); h != "" {
 		config.Host = h
 	}
 
-	// Port precedence: config.yaml > env var > daemon.json > default
-	// config.yaml takes precedence to prevent stale env var pollution
-	portFromConfig := false
-	if os.Getenv("GT_DOLT_IGNORE_CONFIG") == "1" {
-		// Emergency recovery hatch: ignore a bad managed config and use env/daemon
-		// fallbacks below. Does not delete or modify the config file.
-	} else if port := readPortFromConfigYAML(townRoot); port > 0 {
+	if port := configpkg.ResolveDoltPort(townRoot); port > 0 {
 		config.Port = port
-		portFromConfig = true
-	}
-	if !portFromConfig {
-		p := os.Getenv("GT_DOLT_PORT")
-		if p != "" {
-			if port, err := strconv.Atoi(p); err == nil {
-				config.Port = port
-			}
-		}
 	}
 	if scheduler, ok := os.LookupEnv("GT_DOLT_EVENT_SCHEDULER"); ok {
 		config.EventScheduler = scheduler
@@ -385,29 +341,6 @@ func DefaultConfig(townRoot string) *Config {
 		// was started before the manual env var was applied.
 		if ll := readDaemonEnvVar(filepath.Join(townRoot, "daemon", "daemon.env"), "GT_DOLT_LOGLEVEL"); ll != "" {
 			config.LogLevel = ll
-		}
-	}
-
-	// Fallback: if GT_DOLT_PORT is not in the shell env, read it from
-	// mayor/daemon.json. Commands like gt dolt status, gt dolt stop, etc.
-	// are typically run without the daemon.json env vars exported to the
-	// shell, so DefaultConfig would otherwise return the wrong port (3307)
-	// when the town uses a custom port (e.g. GT_DOLT_PORT=3308).
-	// We cannot import the daemon package here (circular: daemon→doltserver),
-	// so we parse the minimal JSON structure directly.
-	if !portFromConfig && os.Getenv("GT_DOLT_PORT") == "" && townRoot != "" {
-		daemonJSONPath := filepath.Join(townRoot, "mayor", "daemon.json")
-		if data, err := os.ReadFile(daemonJSONPath); err == nil {
-			var daemonEnv struct {
-				Env map[string]string `json:"env"`
-			}
-			if err := json.Unmarshal(data, &daemonEnv); err == nil {
-				if v, ok := daemonEnv.Env["GT_DOLT_PORT"]; ok {
-					if port, err := strconv.Atoi(v); err == nil {
-						config.Port = port
-					}
-				}
-			}
 		}
 	}
 
@@ -2791,7 +2724,7 @@ func issuePrefixForRigInit(townRoot, rigName string) string {
 	}
 
 	rigsConfigPath := filepath.Join(townRoot, "mayor", "rigs.json")
-	if rigsConfig, err := config.LoadRigsConfig(rigsConfigPath); err == nil {
+	if rigsConfig, err := configpkg.LoadRigsConfig(rigsConfigPath); err == nil {
 		if entry, ok := rigsConfig.Rigs[rigName]; ok && entry.BeadsConfig != nil {
 			if prefix := strings.TrimSpace(strings.TrimSuffix(entry.BeadsConfig.Prefix, "-")); prefix != "" {
 				return prefix
@@ -3154,7 +3087,7 @@ func collectReferencedDatabases(townRoot string) map[string]bool {
 	// Some rigs use their prefix as the database name (e.g., "lc" for laneassist,
 	// "gt" for gastown). If metadata.json is missing or corrupted, the prefix-named
 	// DB would appear orphaned without this fallback. (gt-85w7)
-	for _, prefix := range config.AllRigPrefixes(townRoot) {
+	for _, prefix := range configpkg.AllRigPrefixes(townRoot) {
 		referenced[prefix] = true
 	}
 

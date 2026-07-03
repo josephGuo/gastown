@@ -175,6 +175,7 @@ func TestReconstructFromContext(t *testing.T) {
 		Agent:       "codex",
 		Mode:        "ralph",
 		NoMerge:     true,
+		ReviewOnly:  true,
 		HookRawBead: true,
 	}
 
@@ -212,6 +213,9 @@ func TestReconstructFromContext(t *testing.T) {
 	}
 	if !params.NoMerge {
 		t.Error("NoMerge: expected true")
+	}
+	if !params.ReviewOnly {
+		t.Error("ReviewOnly: expected true")
 	}
 	if !params.HookRawBead {
 		t.Error("HookRawBead: expected true")

@@ -291,10 +291,8 @@ func (b *Beads) ListQueueBeads() (map[string]*Issue, error) {
 }
 
 // DeleteQueueBead permanently deletes a queue bead.
-// Uses --hard --force for immediate permanent deletion (no tombstone).
 func (b *Beads) DeleteQueueBead(id string) error {
-	_, err := b.run("delete", id, "--hard", "--force")
-	return err
+	return b.deleteBead(id)
 }
 
 // LookupQueueByName finds a queue by its name field (not by ID).

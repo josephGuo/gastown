@@ -659,10 +659,25 @@ func writeJSON(path string, data interface{}) error {
 // buildBdInitArgs returns the arguments for `bd init` including the correct
 // --server-port derived from the town's Dolt configuration.
 func buildBdInitArgs(townPath string) []string {
-	cfg := doltserver.DefaultConfig(townPath)
+	cfg := bdInitDoltConfig(townPath)
 	// gt install --force preserves town state; bd reinit flags would destroy town beads.
 	return []string{"init", "--prefix", "hq", "--server",
 		"--server-port", strconv.Itoa(cfg.Port)}
+}
+
+func bdInitDoltConfig(townPath string) *doltserver.Config {
+	cfg := doltserver.DefaultConfig(townPath)
+	// bd init targets durable town configuration. Keep non-endpoint defaults from
+	// DefaultConfig, but do not let ambient endpoint env override target config.
+	cfg.Host = ""
+	if host := config.ResolveConfiguredDoltHost(townPath); host != "" {
+		cfg.Host = host
+	}
+	cfg.Port = doltserver.DefaultPort
+	if port := config.ResolveConfiguredDoltPort(townPath); port > 0 {
+		cfg.Port = port
+	}
+	return cfg
 }
 
 // initTownBeads initializes town-level beads database using bd init.
@@ -672,7 +687,7 @@ func initTownBeads(townPath string) error {
 	// Dolt server is required — wait for it to accept queries before proceeding.
 	// The server may have just been started by gt install and TCP reachability
 	// alone is not sufficient; we need MySQL protocol readiness.
-	cfg := doltserver.DefaultConfig(townPath)
+	cfg := bdInitDoltConfig(townPath)
 	// wa-d6f: socket-first DSN (TCP fallback) — same rationale.
 	dsn := buildDoltDSNFromConfig(cfg, "", dsnOpts{})
 	var lastErr error
@@ -697,9 +712,8 @@ func initTownBeads(townPath string) error {
 	// Dolt is the only backend since bd v0.51.0; no --backend flag needed.
 	// Filter inherited BEADS_DIR so bd init targets this town, not a parent .beads.
 	// Always pass --server-port so bd connects to the correct Dolt server.
-	// DefaultConfig resolves the port from config.yaml > GT_DOLT_PORT env > default (3307).
-	// Forward GT_DOLT_PORT so bd connects to the correct server when a
-	// non-default port is configured (e.g., ephemeral test servers in CI).
+	// bd init targets durable town config, so config.yaml beats ambient
+	// GT_DOLT_PORT that may be stale in long-lived agent sessions.
 	bdInitArgs := buildBdInitArgs(townPath)
 	cmd := exec.Command("bd", bdInitArgs...)
 	cmd.Dir = townPath
@@ -774,23 +788,23 @@ func initTownBeads(townPath string) error {
 	return nil
 }
 
-// withBeadsDirEnv returns an environment with BEADS_DIR pinned to the target
-// beads directory and any inherited BEADS_DIR removed. Also sets
-// BEADS_DOLT_SERVER_DATABASE if metadata.json specifies a database name,
-// ensuring bd never falls back to the default "beads" database.
+// withBeadsDirEnv returns the hardened bd mutation environment pinned to the
+// target beads directory, with stale selectors stripped and canonical Dolt
+// endpoint aliases rebuilt from the shared helper.
 func withBeadsDirEnv(beadsDir string) []string {
-	env := os.Environ()
-	filtered := make([]string, 0, len(env)+2)
-	for _, e := range env {
-		if !strings.HasPrefix(e, "BEADS_DIR=") && !strings.HasPrefix(e, "BEADS_DB=") && !strings.HasPrefix(e, "BEADS_DOLT_SERVER_DATABASE=") {
-			filtered = append(filtered, e)
+	base := os.Environ()
+	if townRoot := beads.FindTownRoot(filepath.Dir(beads.ResolveBeadsDir(beadsDir))); townRoot != "" {
+		base = config.NormalizeConfiguredDoltEnv(base, townRoot)
+		if host := config.ResolveConfiguredDoltHost(townRoot); host != "" {
+			base = beads.StripEnvKey(base, "GT_DOLT_HOST")
+			base = append(base, "GT_DOLT_HOST="+host)
+		}
+		if port := config.ResolveConfiguredDoltPort(townRoot); port > 0 {
+			base = beads.StripEnvKey(base, "GT_DOLT_PORT")
+			base = append(base, "GT_DOLT_PORT="+strconv.Itoa(port))
 		}
 	}
-	filtered = append(filtered, "BEADS_DIR="+beadsDir)
-	if dbEnv := beads.DatabaseEnv(beadsDir); dbEnv != "" {
-		filtered = append(filtered, dbEnv)
-	}
-	return filtered
+	return beads.BuildMutationPinnedBDEnv(base, beadsDir)
 }
 
 // ensureCustomTypes registers Gas Town custom issue types with beads.

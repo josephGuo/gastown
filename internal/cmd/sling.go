@@ -748,11 +748,11 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	newPolecatInfo := resolved.NewPolecatInfo
 	isSelfSling := resolved.IsSelfSling
 	rollbackSpawnedPolecat := func(reason string) {
-		if newPolecatInfo == nil {
-			return
+		if newPolecatInfo != nil {
+			fmt.Printf("%s %s, rolling back spawned polecat %s...\n", style.Warning.Render("⚠"), reason, newPolecatInfo.PolecatName)
+			rollbackSlingArtifactsFn(newPolecatInfo, beadID, hookWorkDir, "")
 		}
-		fmt.Printf("%s %s, rolling back spawned polecat %s...\n", style.Warning.Render("⚠"), reason, newPolecatInfo.PolecatName)
-		rollbackSlingArtifactsFn(newPolecatInfo, beadID, hookWorkDir, "")
+		restoreRollbackRawWorkflowFieldsFromCurrent(beadID, townRoot, hookWorkDir, info)
 		// Under --force, rollback's unhook can clear a pinned bead's original state.
 		if force && originalStatus == "pinned" {
 			restorePinnedBead(townRoot, beadID, originalAssignee)
@@ -790,49 +790,54 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	// Handle --force when bead is already hooked/in_progress: send shutdown to old polecat and unhook (GH#1380)
 	if (info.Status == "hooked" || info.Status == "in_progress") && force && info.Assignee != "" {
 		fmt.Printf("%s Bead already hooked to %s, forcing reassignment...\n", style.Warning.Render("⚠"), info.Assignee)
+		if slingDryRun {
+			fmt.Printf("Would send LIFECYCLE:Shutdown to previous assignee %s\n", info.Assignee)
+			fmt.Printf("Would unhook %s from previous assignee\n", beadID)
+		} else {
 
-		// Determine requester identity from env vars, fall back to "gt-sling"
-		requester := "gt-sling"
-		if polecat := os.Getenv("GT_POLECAT"); polecat != "" {
-			requester = polecat
-		} else if user := os.Getenv("USER"); user != "" {
-			requester = user
-		}
+			// Determine requester identity from env vars, fall back to "gt-sling"
+			requester := "gt-sling"
+			if polecat := os.Getenv("GT_POLECAT"); polecat != "" {
+				requester = polecat
+			} else if user := os.Getenv("USER"); user != "" {
+				requester = user
+			}
 
-		// Extract rig name from assignee (e.g., "gastown/polecats/Toast" -> "gastown")
-		assigneeParts := strings.Split(info.Assignee, "/")
-		if len(assigneeParts) >= 3 && assigneeParts[1] == "polecats" {
-			oldRigName := assigneeParts[0]
-			oldPolecatName := assigneeParts[2]
+			// Extract rig name from assignee (e.g., "gastown/polecats/Toast" -> "gastown")
+			assigneeParts := strings.Split(info.Assignee, "/")
+			if len(assigneeParts) >= 3 && assigneeParts[1] == "polecats" {
+				oldRigName := assigneeParts[0]
+				oldPolecatName := assigneeParts[2]
 
-			// Send LIFECYCLE:Shutdown to witness - will auto-nuke if clean,
-			// otherwise create cleanup wisp for manual intervention
-			if townRoot != "" {
-				router := mail.NewRouter(townRoot)
-				defer router.WaitPendingNotifications()
-				shutdownMsg := &mail.Message{
-					From:     "gt-sling",
-					To:       fmt.Sprintf("%s/witness", oldRigName),
-					Subject:  fmt.Sprintf("LIFECYCLE:Shutdown %s", oldPolecatName),
-					Body:     fmt.Sprintf("Reason: work_reassigned\nRequestedBy: %s\nBead: %s\nNewAssignee: %s", requester, beadID, targetAgent),
-					Type:     mail.TypeTask,
-					Priority: mail.PriorityHigh,
-				}
-				if err := router.Send(shutdownMsg); err != nil {
-					fmt.Printf("%s Could not send shutdown to witness: %v\n", style.Dim.Render("Warning:"), err)
-				} else {
-					fmt.Printf("%s Sent LIFECYCLE:Shutdown to %s/witness for %s\n", style.Bold.Render("→"), oldRigName, oldPolecatName)
+				// Send LIFECYCLE:Shutdown to witness - will auto-nuke if clean,
+				// otherwise create cleanup wisp for manual intervention
+				if townRoot != "" {
+					router := mail.NewRouter(townRoot)
+					defer router.WaitPendingNotifications()
+					shutdownMsg := &mail.Message{
+						From:     "gt-sling",
+						To:       fmt.Sprintf("%s/witness", oldRigName),
+						Subject:  fmt.Sprintf("LIFECYCLE:Shutdown %s", oldPolecatName),
+						Body:     fmt.Sprintf("Reason: work_reassigned\nRequestedBy: %s\nBead: %s\nNewAssignee: %s", requester, beadID, targetAgent),
+						Type:     mail.TypeTask,
+						Priority: mail.PriorityHigh,
+					}
+					if err := router.Send(shutdownMsg); err != nil {
+						fmt.Printf("%s Could not send shutdown to witness: %v\n", style.Dim.Render("Warning:"), err)
+					} else {
+						fmt.Printf("%s Sent LIFECYCLE:Shutdown to %s/witness for %s\n", style.Bold.Render("→"), oldRigName, oldPolecatName)
+					}
 				}
 			}
-		}
 
-		// Unhook the bead from old owner (set status back to open)
-		unhookDir := beads.ResolveHookDir(townRoot, beadID, "")
-		if err := BdCmd("update", beadID, "--status=open", "--assignee=").
-			Dir(unhookDir).
-			WithAutoCommit().
-			Run(); err != nil {
-			fmt.Printf("%s Could not unhook bead from old owner: %v\n", style.Dim.Render("Warning:"), err)
+			// Unhook the bead from old owner (set status back to open)
+			unhookDir := beads.ResolveHookDir(townRoot, beadID, "")
+			if err := BdCmd("update", beadID, "--status=open", "--assignee=").
+				Dir(unhookDir).
+				WithAutoCommit().
+				Run(); err != nil {
+				fmt.Printf("%s Could not unhook bead from old owner: %v\n", style.Dim.Render("Warning:"), err)
+			}
 		}
 	}
 
@@ -892,10 +897,13 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	// Without this, each sling creates a new wisp bonded to the bead, leaving orphaned molecules.
 	// NOTE: Uses local `force` (not `slingForce`) to respect auto-force paths (dead agent detection).
 	if formulaName != "" {
-		existingMolecules := collectExistingMolecules(info)
+		existingMolecules, err := collectExistingMoleculesForBead(info, beadID, townRoot)
+		if err != nil {
+			return fmt.Errorf("checking existing molecule bonds: %w", err)
+		}
 		if len(existingMolecules) > 0 {
 			stale := force || isOrphanMolecule(info)
-			if slingDryRun {
+			if slingDryRun && stale {
 				fmt.Printf("  Would burn %d stale molecule(s): %s\n",
 					len(existingMolecules), strings.Join(existingMolecules, ", "))
 			} else if stale {
@@ -915,9 +923,8 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		if formulaName != "" {
 			fmt.Printf("Would instantiate formula %s:\n", formulaName)
 			fmt.Printf("  1. bd cook %s\n", formulaName)
-			fmt.Printf("  2. bd mol wisp %s --var feature=\"%s\" --var issue=\"%s\"\n", formulaName, info.Title, beadID)
-			fmt.Printf("  3. bd mol bond <wisp-root> %s\n", beadID)
-			fmt.Printf("  4. bd update <compound-root> --status=hooked --assignee=%s\n", targetAgent)
+			fmt.Printf("  2. bd mol bond %s %s --json --ephemeral --var feature=\"%s\" --var issue=\"%s\"\n", formulaName, beadID, info.Title, beadID)
+			fmt.Printf("  3. bd update %s --status=hooked --assignee=%s\n", beadID, targetAgent)
 		} else {
 			fmt.Printf("Would run: bd update %s --status=hooked --assignee=%s\n", beadID, targetAgent)
 		}
@@ -953,14 +960,7 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 			// If we spawned a fresh polecat (rig target), rollback the partial artifacts.
 			// Otherwise, a wisp creation failure (e.g., missing required vars) leaves an orphaned polecat.
 			if newPolecatInfo != nil {
-				fmt.Printf("%s Formula instantiation failed, rolling back spawned polecat %s...\n",
-					style.Warning.Render("⚠"), newPolecatInfo.PolecatName)
-				rollbackSlingArtifactsFn(newPolecatInfo, beadID, hookWorkDir, "")
-				// Under --force, if this bead was previously pinned, rollback's unhook would otherwise
-				// clear the pinned state. Restore pinned state so we don't lose the original hook.
-				if force && originalStatus == "pinned" {
-					restorePinnedBead(townRoot, beadID, originalAssignee)
-				}
+				rollbackSpawnedPolecat("Formula instantiation failed")
 			}
 			return fmt.Errorf("instantiating formula %s: %w", formulaName, err)
 		}
@@ -990,6 +990,26 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		// - Base bead left orphaned after gt done
 	}
 
+	actor := detectActor()
+	mode := ""
+	if slingRalph {
+		mode = "ralph"
+	}
+	fieldUpdates := buildSlingFieldUpdates(
+		actor,
+		slingArgs,
+		varsForAttachment,
+		attachedMoleculeID,
+		formulaName,
+		slingNoMerge,
+		slingReviewOnly,
+		mode,
+		formulaVarsForAttachment,
+		convoyID,
+		slingMerge,
+		slingOwned,
+	)
+
 	// Hook the bead with retry and verification.
 	// See: https://github.com/steveyegge/gastown/issues/148
 	//
@@ -1001,6 +1021,16 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		return fmt.Errorf("serializing hook write for %s: %w", targetAgent, assigneeLockErr)
 	}
 	defer assigneeUnlock()
+	if attachedMoleculeID == "" && (slingNoMerge || slingReviewOnly) {
+		if err := storeFieldsInBeadFromTownRoot(townRoot, beadID, fieldUpdates); err != nil {
+			if newPolecatInfo != nil {
+				fmt.Printf("%s Raw sling metadata failed, cleaning up spawned polecat %s...\n", style.Warning.Render("⚠"), newPolecatInfo.PolecatName)
+				cleanupSpawnedPolecat(newPolecatInfo, newPolecatInfo.RigName, convoyID)
+			}
+			restoreRollbackRawWorkflowFieldsFromCurrent(beadID, townRoot, hookWorkDir, info)
+			return fmt.Errorf("storing raw sling metadata before hook: %w", err)
+		}
+	}
 	hookDir := beads.ResolveHookDir(townRoot, beadID, hookWorkDir)
 	if err := hookBeadWithRetryFn(beadID, targetAgent, hookDir); err != nil {
 		rollbackSpawnedPolecat("Hook failed")
@@ -1024,7 +1054,6 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	fmt.Printf("%s Work attached to hook (status=hooked)\n", style.Bold.Render("✓"))
 
 	// Log sling event to activity feed
-	actor := detectActor()
 	_ = events.LogFeed(events.TypeSling, actor, events.SlingPayload(beadID, targetAgent))
 
 	// Update agent bead's hook_bead field (ZFC: agents track their current work)
@@ -1038,24 +1067,6 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	// Store all attachment fields in a single read-modify-write cycle.
 	// This eliminates the race condition where sequential independent updates
 	// (dispatcher, args, no_merge, attached_molecule) could overwrite each other.
-	mode := ""
-	if slingRalph {
-		mode = "ralph"
-	}
-	fieldUpdates := buildSlingFieldUpdates(
-		actor,
-		slingArgs,
-		varsForAttachment,
-		attachedMoleculeID,
-		formulaName,
-		slingNoMerge,
-		slingReviewOnly,
-		mode,
-		formulaVarsForAttachment,
-		convoyID,
-		slingMerge,
-		slingOwned,
-	)
 	if err := storeFieldsInBeadFromTownRoot(townRoot, beadID, fieldUpdates); err != nil {
 		// Warn but don't fail - polecat will still complete work
 		fmt.Printf("%s Could not store fields in bead: %v\n", style.Dim.Render("Warning:"), err)
@@ -1092,8 +1103,7 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		if err != nil {
 			// Rollback: session failed, clean up zombie artifacts (worktree, hooked bead).
 			// Without rollback, next sling attempt fails with "bead already hooked" (gt-jn40ft).
-			fmt.Printf("%s Session failed, rolling back spawned polecat %s...\n", style.Warning.Render("⚠"), newPolecatInfo.PolecatName)
-			rollbackSlingArtifactsFn(newPolecatInfo, beadID, hookWorkDir, "")
+			rollbackSpawnedPolecat("Session failed")
 			return fmt.Errorf("starting polecat session: %w", err)
 		}
 		targetPane = pane
@@ -1195,6 +1205,72 @@ var rollbackSlingArtifactsFn = rollbackSlingArtifacts
 var getBeadInfoForRollback = getBeadInfo
 var collectExistingMoleculesForRollback = collectExistingMolecules
 var burnExistingMoleculesForRollback = burnExistingMolecules
+
+func rawWorkflowFieldValues(info *beadInfo) (noMerge, reviewOnly bool, attachedAt string) {
+	if info == nil {
+		return false, false, ""
+	}
+	issue := &beads.Issue{Description: info.Description}
+	fields := beads.ParseAttachmentFields(issue)
+	if fields == nil {
+		return false, false, ""
+	}
+	return fields.NoMerge, fields.ReviewOnly, fields.AttachedAt
+}
+
+func restoreRollbackRawWorkflowFields(beadID, townRoot, hookWorkDir string, info, originalInfo *beadInfo) (bool, error) {
+	if info == nil {
+		return false, nil
+	}
+	originalNoMerge, originalReviewOnly, originalAttachedAt := rawWorkflowFieldValues(originalInfo)
+	issue := &beads.Issue{Description: info.Description}
+	fields := beads.ParseAttachmentFields(issue)
+	if fields == nil {
+		if !originalNoMerge && !originalReviewOnly {
+			return false, nil
+		}
+		fields = &beads.AttachmentFields{}
+	}
+	if fields.NoMerge == originalNoMerge && fields.ReviewOnly == originalReviewOnly && fields.AttachedAt == originalAttachedAt {
+		return false, nil
+	}
+	fields.NoMerge = originalNoMerge
+	fields.ReviewOnly = originalReviewOnly
+	fields.AttachedAt = originalAttachedAt
+	newDesc := beads.SetAttachmentFields(issue, fields)
+	if newDesc == info.Description {
+		return false, nil
+	}
+	updateDir := beads.ResolveHookDir(townRoot, beadID, hookWorkDir)
+	if err := BdCmd("update", beadID, "--description="+newDesc).
+		Dir(updateDir).
+		StripBeadsDir().
+		WithAutoCommit().
+		Run(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func clearRollbackRawWorkflowFields(beadID, townRoot, hookWorkDir string, info *beadInfo) (bool, error) {
+	return restoreRollbackRawWorkflowFields(beadID, townRoot, hookWorkDir, info, nil)
+}
+
+func restoreRollbackRawWorkflowFieldsFromCurrent(beadID, townRoot, hookWorkDir string, originalInfo *beadInfo) {
+	if beadID == "" || townRoot == "" {
+		return
+	}
+	info, err := getBeadInfoForRollback(beadID)
+	if err != nil {
+		fmt.Printf("  %s Could not inspect bead %s for raw workflow metadata rollback: %v\n", style.Dim.Render("Warning:"), beadID, err)
+		return
+	}
+	if restored, restoreErr := restoreRollbackRawWorkflowFields(beadID, townRoot, hookWorkDir, info, originalInfo); restoreErr != nil {
+		fmt.Printf("  %s Could not restore raw workflow metadata on %s: %v\n", style.Dim.Render("Warning:"), beadID, restoreErr)
+	} else if restored {
+		fmt.Printf("  %s Restored raw workflow metadata on %s\n", style.Dim.Render("○"), beadID)
+	}
+}
 
 func restorePinnedBead(townRoot, beadID, assignee string) {
 	if townRoot == "" || beadID == "" {
@@ -1304,12 +1380,31 @@ func rollbackSlingArtifacts(spawnInfo *SpawnedPolecatInfo, beadID, hookWorkDir, 
 				fmt.Printf("  %s Could not inspect bead %s for stale molecules: %v\n", style.Dim.Render("Warning:"), beadID, infoErr)
 			} else {
 				existingMolecules := collectExistingMoleculesForRollback(info)
+				if depMolecules, depErr := collectExistingMoleculeDeps(beadID, townRoot); depErr != nil {
+					fmt.Printf("  %s Could not inspect canonical molecule bonds for %s: %v\n", style.Dim.Render("Warning:"), beadID, depErr)
+				} else {
+					existingMolecules = appendUniqueMolecules(existingMolecules, depMolecules...)
+				}
+				canClearWorkflowFields := len(existingMolecules) == 0
 				if len(existingMolecules) > 0 {
 					if burnErr := burnExistingMoleculesForRollback(existingMolecules, beadID, townRoot); burnErr != nil {
 						fmt.Printf("  %s Could not burn stale molecule(s) from %s: %v\n", style.Dim.Render("Warning:"), beadID, burnErr)
 					} else {
 						fmt.Printf("  %s Burned %d stale molecule(s): %s\n",
 							style.Dim.Render("○"), len(existingMolecules), strings.Join(existingMolecules, ", "))
+						if refreshed, refreshErr := getBeadInfoForRollback(beadID); refreshErr != nil {
+							fmt.Printf("  %s Could not refresh bead %s after molecule cleanup: %v\n", style.Dim.Render("Warning:"), beadID, refreshErr)
+						} else {
+							info = refreshed
+							canClearWorkflowFields = true
+						}
+					}
+				}
+				if canClearWorkflowFields {
+					if cleared, clearErr := clearRollbackRawWorkflowFields(beadID, townRoot, hookWorkDir, info); clearErr != nil {
+						fmt.Printf("  %s Could not clear raw workflow metadata from %s: %v\n", style.Dim.Render("Warning:"), beadID, clearErr)
+					} else if cleared {
+						fmt.Printf("  %s Cleared raw workflow metadata from %s\n", style.Dim.Render("○"), beadID)
 					}
 				}
 			}

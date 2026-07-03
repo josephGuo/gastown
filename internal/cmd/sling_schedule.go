@@ -252,6 +252,7 @@ func runBatchSchedule(beadIDs []string, rigName, townRoot string) error {
 			DryRun:       false,
 			Force:        slingForce,
 			NoMerge:      slingNoMerge,
+			ReviewOnly:   slingReviewOnly,
 			Account:      slingAccount,
 			Agent:        slingAgent,
 			HookRawBead:  slingHookRawBead,
@@ -422,7 +423,7 @@ func detectSchedulerIDType(id string) (string, error) {
 // not convoy or epic mode.
 var schedulerTaskOnlyFlagNames = []string{
 	"account", "agent", "ralph", "args", "var",
-	"merge", "base-branch", "no-convoy", "owned", "no-merge",
+	"merge", "base-branch", "no-convoy", "owned", "no-merge", "review-only",
 }
 
 // validateNoTaskOnlySchedulerFlags checks that no task-only flags were set.

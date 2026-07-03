@@ -300,14 +300,25 @@ func TestConvoyDependencyTargetsQueryUsesTypedTargets(t *testing.T) {
 }
 
 func TestResolveHost(t *testing.T) {
+	os.Unsetenv("GT_DOLT_HOST")
+	os.Unsetenv("DOLT_HOST")
+
 	// Flag takes precedence
 	if got := resolveHost("192.168.1.1"); got != "192.168.1.1" {
 		t.Errorf("resolveHost with flag = %q, want 192.168.1.1", got)
 	}
 
-	// Env var
+	// GT_DOLT_HOST takes precedence over DOLT_HOST
+	os.Setenv("GT_DOLT_HOST", "10.0.0.2")
 	os.Setenv("DOLT_HOST", "10.0.0.1")
+	defer os.Unsetenv("GT_DOLT_HOST")
 	defer os.Unsetenv("DOLT_HOST")
+	if got := resolveHost(""); got != "10.0.0.2" {
+		t.Errorf("resolveHost with GT_DOLT_HOST = %q, want 10.0.0.2", got)
+	}
+
+	// DOLT_HOST fallback
+	os.Unsetenv("GT_DOLT_HOST")
 	if got := resolveHost(""); got != "10.0.0.1" {
 		t.Errorf("resolveHost with DOLT_HOST = %q, want 10.0.0.1", got)
 	}

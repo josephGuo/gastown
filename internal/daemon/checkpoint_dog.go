@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
+	gtgit "github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/util"
 )
@@ -37,15 +38,6 @@ func checkpointDogInterval(config *DaemonPatrolConfig) time.Duration {
 		}
 	}
 	return defaultCheckpointDogInterval
-}
-
-// runtimeExcludeDirs are directories to unstage after git add -A.
-// These contain runtime/ephemeral data that should not be checkpointed.
-var runtimeExcludeDirs = []string{
-	".claude/",
-	".beads/",
-	".runtime/",
-	"__pycache__/",
 }
 
 // runCheckpointDog auto-commits WIP changes in active polecat worktrees.
@@ -152,10 +144,19 @@ func (d *Daemon) checkpointWorktree(workDir, rigName, polecatName string) bool {
 		return false
 	}
 
-	// Unstage runtime/ephemeral directories
-	for _, dir := range runtimeExcludeDirs {
-		// git reset HEAD -- <dir> is safe even if dir doesn't exist (exits 0)
-		_, _ = runGitCmd(workDir, "reset", "HEAD", "--", dir)
+	// Unstage runtime/ephemeral artifacts using the same centralized policy as
+	// gt done. Scanning staged paths catches tracked nested runtime dirs that
+	// git add -A can restage despite ignore rules.
+	stagedOut, err := runGitCmdRaw(workDir, "diff", "--cached", "--name-only", "-z")
+	if err != nil {
+		d.logger.Printf("checkpoint_dog: git diff --cached failed in %s/%s: %v", rigName, polecatName, err)
+		return false
+	}
+	for _, pathspec := range gtgit.RuntimeArtifactPathspecs(splitNullSeparatedPaths(stagedOut)) {
+		if _, err := runGitCmd(workDir, "reset", "HEAD", "--", pathspec); err != nil {
+			d.logger.Printf("checkpoint_dog: git reset runtime artifact %q failed in %s/%s: %v", pathspec, rigName, polecatName, err)
+			return false
+		}
 	}
 
 	// Unstage deletions of tracked files. A checkpoint should preserve work
@@ -221,6 +222,14 @@ func resolveCheckpointWorkDir(polecatsDir, polecatName, rigName string) string {
 
 // runGitCmd executes a git command in the given directory and returns stdout.
 func runGitCmd(workDir string, args ...string) (string, error) {
+	out, err := runGitCmdRaw(workDir, args...)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+func runGitCmdRaw(workDir string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = workDir
 	util.SetDetachedProcessGroup(cmd)
@@ -238,5 +247,19 @@ func runGitCmd(workDir string, args ...string) (string, error) {
 		return "", err
 	}
 
-	return strings.TrimSpace(stdout.String()), nil
+	return stdout.String(), nil
+}
+
+func splitNullSeparatedPaths(out string) []string {
+	if out == "" {
+		return nil
+	}
+	parts := strings.Split(out, "\x00")
+	paths := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part != "" {
+			paths = append(paths, part)
+		}
+	}
+	return paths
 }

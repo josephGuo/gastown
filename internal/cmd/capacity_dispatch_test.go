@@ -1,8 +1,12 @@
 package cmd
 
 import (
+	"errors"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 )
 
 func TestShouldFireCrossRigEscalation_Debounces(t *testing.T) {
@@ -44,4 +48,43 @@ func TestShouldFireCrossRigEscalation_KeyedByRigAndPrefix(t *testing.T) {
 	if shouldFireCrossRigEscalation("walletui", "hq", now.Add(time.Minute)) {
 		t.Fatalf("walletui/hq repeat must not fire")
 	}
+}
+
+func TestDispatchSingleBeadRawReviewOnlyHookFailureClearsMetadata(t *testing.T) {
+	townRoot, _, descPath := setupMutableBDRawSlingTest(t, "Keep this body.")
+
+	prevSpawn := spawnPolecatForSling
+	prevHook := hookBeadWithRetryWithTownRootFn
+	t.Cleanup(func() {
+		spawnPolecatForSling = prevSpawn
+		hookBeadWithRetryWithTownRootFn = prevHook
+	})
+	spawnPolecatForSling = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+		return &SpawnedPolecatInfo{
+			RigName:     rigName,
+			PolecatName: "toast",
+			ClonePath:   filepath.Join(townRoot, "gastown", "polecats", "toast"),
+		}, nil
+	}
+	hookBeadWithRetryWithTownRootFn = func(beadID, targetAgent, hookDir, townRoot string) error {
+		assertHasRawReviewMetadata(t, readMutableBDDescription(t, descPath))
+		return errors.New("forced hook failure")
+	}
+
+	_, err := dispatchSingleBead(capacity.PendingBead{
+		ID:         "gt-context",
+		WorkBeadID: "gt-rawrollback",
+		TargetRig:  "gastown",
+		Context: &capacity.SlingContextFields{
+			WorkBeadID:  "gt-rawrollback",
+			TargetRig:   "gastown",
+			HookRawBead: true,
+			NoMerge:     true,
+			ReviewOnly:  true,
+		},
+	}, townRoot, "test")
+	if err == nil {
+		t.Fatal("expected scheduler dispatch hook failure")
+	}
+	assertNoRawReviewMetadata(t, readMutableBDDescription(t, descPath))
 }

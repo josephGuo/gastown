@@ -84,7 +84,7 @@ convoys and creates whichever tags/branches are missing.
 ## Step 1: Build and start the snapshot watcher
 
 The Go binary handles all Dolt operations with parameterized SQL.
-It connects using gastown's standard Dolt config (127.0.0.1:3307, root, no password)
+It connects using gastown's standard Dolt config (`GT_DOLT_HOST` / `GT_DOLT_PORT`, defaulting to 127.0.0.1:3307, root, no password)
 and reads routes.jsonl to discover rig databases.
 
 In `--watch` mode, the binary tails `~/.events.jsonl` and runs a snapshot cycle

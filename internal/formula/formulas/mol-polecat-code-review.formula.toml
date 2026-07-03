@@ -277,7 +277,16 @@ Overall assessment:
 bd sync
 ```
 
-**Exit criteria:** Tracking issue updated with summary."""
+**3. Add close evidence for review-only completion:**
+```bash
+HEAD_SHA=$(git rev-parse HEAD)
+bd comments add {{issue}} "PR-SHERIFF-EVIDENCE: code review complete
+head_sha: ${HEAD_SHA}
+verdict: <pass|block>
+summary: <brief summary>"
+```
+
+**Exit criteria:** Tracking issue updated with summary and fresh review evidence comment."""
 
 [[steps]]
 id = "complete-and-exit"

@@ -118,3 +118,32 @@ func TestDispatchReaperDogUsesDogPoolSling(t *testing.T) {
 		}
 	}
 }
+
+func TestDoltServerHostIgnoresStaleBeadsHost(t *testing.T) {
+	t.Setenv("GT_DOLT_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "stale-host")
+
+	d := &Daemon{config: &Config{TownRoot: t.TempDir()}}
+	if got := d.doltServerHost(); got != "127.0.0.1" {
+		t.Fatalf("doltServerHost() = %q, want default localhost", got)
+	}
+}
+
+func TestDoltServerHostUsesConfiguredTownHost(t *testing.T) {
+	t.Setenv("GT_DOLT_IGNORE_CONFIG", "")
+	t.Setenv("GT_DOLT_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "stale-host")
+	townRoot := t.TempDir()
+	doltDataDir := filepath.Join(townRoot, ".dolt-data")
+	if err := os.MkdirAll(doltDataDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(doltDataDir, "config.yaml"), []byte("listener:\n  host: 127.0.0.2\n  port: 5507\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	d := &Daemon{config: &Config{TownRoot: townRoot}}
+	if got := d.doltServerHost(); got != "127.0.0.2" {
+		t.Fatalf("doltServerHost() = %q, want configured host", got)
+	}
+}

@@ -249,6 +249,18 @@ deliverable. There are no code changes to commit. You MUST persist all findings
 to the bead via --notes or --design. Without this, your entire work product is
 lost when the session ends.
 
+**Review-only close evidence:** If the bead has `review_only: true`, notes/design
+are durable report content but do NOT satisfy `gt done`. Add a fresh evidence
+comment after the current assignment, authored by the assignee, with the current
+head SHA before completing:
+```bash
+HEAD_SHA=$(git rev-parse HEAD)
+bd comments add {{issue}} "PR-SHERIFF-EVIDENCE: review complete
+head_sha: ${HEAD_SHA}
+verdict: <pass|block>
+summary: <brief findings>"
+```
+
 **Commit frequently (for code tasks):**
 ```bash
 # After each logical unit of work:
@@ -329,8 +341,10 @@ If your task produced no code changes, verify your findings are persisted to the
 ```bash
 bd show {{issue}}    # Check notes/design fields have your findings
 ```
-If findings are persisted, proceed to review. Report-only tasks with findings
-persisted can skip commit verification.
+If the bead is `review_only: true`, also verify a fresh assignee-authored
+`PR-SHERIFF-EVIDENCE` comment exists for the current `HEAD`.
+If findings/evidence are persisted, proceed to review. Report-only tasks with
+findings persisted can skip commit verification.
 
 **Exit criteria:** Working tree clean AND either (a) at least 1 commit ahead of origin/{{base_branch}}, or (b) report-only task with findings persisted to bead."""
 

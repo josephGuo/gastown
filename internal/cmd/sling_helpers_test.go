@@ -211,6 +211,57 @@ func TestCollectExistingMoleculesFiltersClosedMolecules(t *testing.T) {
 	}
 }
 
+func TestCollectExistingMoleculeDepsReadsCanonicalWispEdges(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses Unix shell script bd stub")
+	}
+
+	binDir := t.TempDir()
+	logPath := filepath.Join(binDir, "bd.log")
+	script := `#!/bin/sh
+echo "$*" >> "${BD_LOG}"
+if [ "$1" = "sql" ]; then
+  case "$2" in
+    *wisp_dependencies*depends_on_issue_id*depends_on_wisp_id*)
+      echo '[{"issue_id":"gt-wisp-live"},{"issue_id":"gt-wisp-live"},{"issue_id":"gt-wisp-other"}]'
+      exit 0
+      ;;
+  esac
+  echo 'unexpected query' >&2
+  exit 1
+fi
+exit 1
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_LOG", logPath)
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+	if err := os.Chdir(binDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	got, err := collectExistingMoleculeDeps("gt-work", "")
+	if err != nil {
+		t.Fatalf("collectExistingMoleculeDeps: %v", err)
+	}
+	want := []string{"gt-wisp-live", "gt-wisp-other"}
+	if len(got) != len(want) {
+		t.Fatalf("collectExistingMoleculeDeps() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("collectExistingMoleculeDeps()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 func TestIsSlingConfigError(t *testing.T) {
 	tests := []struct {
 		name string

@@ -95,6 +95,8 @@ func sdkIssueToIssue(si *beadsdk.Issue) *Issue {
 		ID:                 si.ID,
 		Title:              si.Title,
 		Description:        si.Description,
+		Design:             si.Design,
+		Notes:              si.Notes,
 		Status:             string(si.Status),
 		Priority:           si.Priority,
 		Type:               string(si.IssueType),
@@ -106,6 +108,13 @@ func sdkIssueToIssue(si *beadsdk.Issue) *Issue {
 		Ephemeral:          si.Ephemeral,
 		AcceptanceCriteria: si.AcceptanceCriteria,
 		Metadata:           si.Metadata,
+	}
+	for _, c := range si.Comments {
+		comment, ok := sdkCommentToComment(c)
+		if !ok {
+			continue
+		}
+		issue.Comments = append(issue.Comments, comment)
 	}
 
 	if si.ClosedAt != nil {
@@ -135,6 +144,19 @@ func sdkIssueToIssue(si *beadsdk.Issue) *Issue {
 	}
 
 	return issue
+}
+
+func sdkCommentToComment(c *beadsdk.Comment) (Comment, bool) {
+	if c == nil {
+		return Comment{}, false
+	}
+	return Comment{
+		ID:        c.ID,
+		IssueID:   c.IssueID,
+		Author:    c.Author,
+		Text:      c.Text,
+		CreatedAt: c.CreatedAt.Format(time.RFC3339Nano),
+	}, true
 }
 
 func sdkDependencyMetadataToIssueDep(dep *beadsdk.IssueWithDependencyMetadata) IssueDep {

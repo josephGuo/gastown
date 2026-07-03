@@ -1,8 +1,11 @@
 package daemon
 
 import (
+	"io"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -203,4 +206,92 @@ func TestIsGitWorktree(t *testing.T) {
 	if !isGitWorktree(fileGit) {
 		t.Error(".git file (linked worktree) should count as worktree")
 	}
+}
+
+func TestCheckpointWorktreeExcludesNestedRuntimeArtifacts(t *testing.T) {
+	workDir := t.TempDir()
+	mustRunGit(t, workDir, "init")
+	mustRunGit(t, workDir, "config", "user.name", "Checkpoint Dog")
+	mustRunGit(t, workDir, "config", "user.email", "checkpoint@example.com")
+
+	if err := os.MkdirAll(filepath.Join(workDir, "src"), 0o755); err != nil {
+		t.Fatalf("setup src: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(workDir, "web", ".beads"), 0o755); err != nil {
+		t.Fatalf("setup nested runtime dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "src", "app.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "web", ".beads", "redirect"), []byte("before\n"), 0o644); err != nil {
+		t.Fatalf("write runtime file: %v", err)
+	}
+	mustRunGit(t, workDir, "add", "src/app.go", "web/.beads/redirect")
+	mustRunGit(t, workDir, "commit", "-m", "initial")
+
+	if err := os.WriteFile(filepath.Join(workDir, "src", "app.go"), []byte("package main\n// checkpoint me\n"), 0o644); err != nil {
+		t.Fatalf("modify source: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "web", ".beads", "redirect"), []byte("after\n"), 0o644); err != nil {
+		t.Fatalf("modify runtime file: %v", err)
+	}
+
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	if !d.checkpointWorktree(workDir, "rig", "polecat") {
+		t.Fatal("checkpointWorktree did not create a checkpoint commit")
+	}
+
+	if got := strings.TrimSpace(mustRunGit(t, workDir, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD")); got != "src/app.go" {
+		t.Fatalf("checkpoint commit changed %q, want only src/app.go", got)
+	}
+	if got := strings.TrimSpace(mustRunGit(t, workDir, "diff", "--cached", "--name-only")); got != "" {
+		t.Fatalf("runtime artifact remained staged: %q", got)
+	}
+	if got := strings.TrimSpace(mustRunGit(t, workDir, "diff", "--", "web/.beads/redirect")); got == "" {
+		t.Fatal("nested runtime artifact change was committed or lost; want it left unstaged in worktree")
+	}
+}
+
+func TestCheckpointWorktreeSkipsRuntimeOnlyNestedArtifacts(t *testing.T) {
+	workDir := t.TempDir()
+	mustRunGit(t, workDir, "init")
+	mustRunGit(t, workDir, "config", "user.name", "Checkpoint Dog")
+	mustRunGit(t, workDir, "config", "user.email", "checkpoint@example.com")
+
+	if err := os.MkdirAll(filepath.Join(workDir, "web", ".beads"), 0o755); err != nil {
+		t.Fatalf("setup nested runtime dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "web", ".beads", "redirect"), []byte("before\n"), 0o644); err != nil {
+		t.Fatalf("write runtime file: %v", err)
+	}
+	mustRunGit(t, workDir, "add", "web/.beads/redirect")
+	mustRunGit(t, workDir, "commit", "-m", "initial")
+	before := mustRunGit(t, workDir, "rev-parse", "HEAD")
+
+	if err := os.WriteFile(filepath.Join(workDir, "web", ".beads", "redirect"), []byte("after\n"), 0o644); err != nil {
+		t.Fatalf("modify runtime file: %v", err)
+	}
+
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	if d.checkpointWorktree(workDir, "rig", "polecat") {
+		t.Fatal("checkpointWorktree created a checkpoint for runtime-only changes")
+	}
+	if after := mustRunGit(t, workDir, "rev-parse", "HEAD"); after != before {
+		t.Fatalf("checkpointWorktree advanced HEAD to %s, want %s", after, before)
+	}
+	if got := strings.TrimSpace(mustRunGit(t, workDir, "diff", "--cached", "--name-only")); got != "" {
+		t.Fatalf("runtime artifact remained staged: %q", got)
+	}
+	if got := strings.TrimSpace(mustRunGit(t, workDir, "diff", "--", "web/.beads/redirect")); got == "" {
+		t.Fatal("nested runtime artifact change was lost; want it left unstaged in worktree")
+	}
+}
+
+func mustRunGit(t *testing.T, workDir string, args ...string) string {
+	t.Helper()
+	out, err := runGitCmd(workDir, args...)
+	if err != nil {
+		t.Fatalf("git %s: %v", strings.Join(args, " "), err)
+	}
+	return out
 }

@@ -29,7 +29,6 @@ This is infrastructure work. You:
 
 | Variable | Source | Description |
 |----------|--------|-------------|
-| port | config | Dolt server port (default 3307) |
 | max_orphans_for_sql | config | Max orphans for SQL-based cleanup (default 50) |
 | warn_threshold | config | Orphan count to trigger warning (default 5) |
 
@@ -174,10 +173,6 @@ Status: COMPLETE"
 **Exit criteria:** Report sent, dog returned to kennel."""
 
 [vars]
-[vars.port]
-description = "Dolt server port"
-default = "3307"
-
 [vars.max_orphans_for_sql]
 description = "Maximum orphan count for SQL-based cleanup (above this, escalate instead)"
 default = "50"

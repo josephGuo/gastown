@@ -18,6 +18,7 @@ type bdEnvLogEntry struct {
 	Port     string
 	Legacy   string
 	DataDir  string
+	GTData   string
 	BeadsDB  string
 	BDDB     string
 	Export   string
@@ -77,7 +78,7 @@ func setupRoutedBDEnvStub(t *testing.T) (townRoot, rigDir, logPath string) {
 	logPath = filepath.Join(t.TempDir(), "bd-env.log")
 
 	script := fmt.Sprintf(`#!/bin/sh
-	printf '%%s|%%s|%%s|%%s|%%s|%%s|%%s|%%s|%%s|%%s|%%s\n' "$*" "$(pwd)" "${BEADS_DIR:-}" "${BEADS_DOLT_SERVER_DATABASE:-}" "${BEADS_DOLT_SERVER_HOST:-}" "${BEADS_DOLT_SERVER_PORT:-}" "${BEADS_DOLT_PORT:-}" "${BEADS_DOLT_DATA_DIR:-}" "${BEADS_DB:-}" "${BD_DB:-}" "${BD_EXPORT_AUTO:-}" >> "%s"
+	printf '%%s|%%s|%%s|%%s|%%s|%%s|%%s|%%s|%%s|%%s|%%s|%%s\n' "$*" "$(pwd)" "${BEADS_DIR:-}" "${BEADS_DOLT_SERVER_DATABASE:-}" "${BEADS_DOLT_SERVER_HOST:-}" "${BEADS_DOLT_SERVER_PORT:-}" "${BEADS_DOLT_PORT:-}" "${BEADS_DOLT_DATA_DIR:-}" "${GT_DOLT_DATA:-}" "${BEADS_DB:-}" "${BD_DB:-}" "${BD_EXPORT_AUTO:-}" >> "%s"
 
 case "$1" in
   show)
@@ -129,6 +130,9 @@ func poisonBDTargetEnv(t *testing.T, townRoot string) {
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "9999")
 	t.Setenv("BEADS_DOLT_PORT", "9999")
 	t.Setenv("BEADS_DOLT_DATA_DIR", filepath.Join(townRoot, "wrong-data"))
+	t.Setenv("GT_DOLT_HOST", "")
+	t.Setenv("GT_DOLT_PORT", "")
+	t.Setenv("GT_DOLT_DATA", filepath.Join(townRoot, "wrong-gt-data"))
 	t.Setenv("BEADS_DB", filepath.Join(townRoot, "wrong.db"))
 	t.Setenv("BD_DB", filepath.Join(townRoot, "wrong.bd"))
 	t.Setenv("BD_EXPORT_AUTO", "true")
@@ -146,7 +150,7 @@ func readBDEnvLog(t *testing.T, logPath string) []bdEnvLogEntry {
 			continue
 		}
 		fields := strings.Split(line, "|")
-		if len(fields) != 11 {
+		if len(fields) != 12 {
 			t.Fatalf("malformed bd env log line %q: fields=%v", line, fields)
 		}
 		entries = append(entries, bdEnvLogEntry{
@@ -158,9 +162,10 @@ func readBDEnvLog(t *testing.T, logPath string) []bdEnvLogEntry {
 			Port:     fields[5],
 			Legacy:   fields[6],
 			DataDir:  fields[7],
-			BeadsDB:  fields[8],
-			BDDB:     fields[9],
-			Export:   fields[10],
+			GTData:   fields[8],
+			BeadsDB:  fields[9],
+			BDDB:     fields[10],
+			Export:   fields[11],
 		})
 	}
 	return entries
@@ -204,6 +209,9 @@ func assertBDEnvLogWithBeadsDir(t *testing.T, entry bdEnvLogEntry, wantDir, want
 	}
 	if entry.DataDir != "" {
 		t.Fatalf("%q BEADS_DOLT_DATA_DIR should be stripped, got %q", entry.Args, entry.DataDir)
+	}
+	if entry.GTData != "" {
+		t.Fatalf("%q GT_DOLT_DATA should be stripped, got %q", entry.Args, entry.GTData)
 	}
 	if entry.BeadsDB != "" || entry.BDDB != "" {
 		t.Fatalf("%q stale DB env leaked: BEADS_DB=%q BD_DB=%q", entry.Args, entry.BeadsDB, entry.BDDB)

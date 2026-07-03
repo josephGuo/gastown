@@ -2927,21 +2927,29 @@ func isGasTownRuntimePath(path string) bool {
 	return ok
 }
 
-// RuntimeArtifactPaths returns deduplicated pathspecs for runtime artifacts in the
-// current uncommitted work. Callers can pass the result to git reset after git add
+// RuntimeArtifactPathspecs returns deduplicated git pathspecs for runtime
+// artifacts in paths. Callers can pass the result to git reset after git add
 // to keep generated state out of safety-net commits.
-func (s *UncommittedWorkStatus) RuntimeArtifactPaths() []string {
+func RuntimeArtifactPathspecs(paths []string) []string {
 	seen := make(map[string]bool)
-	var paths []string
-	for _, f := range append(append([]string{}, s.ModifiedFiles...), s.UntrackedFiles...) {
+	var pathspecs []string
+	for _, f := range paths {
 		root, ok := runtimeArtifactRoot(f)
 		if !ok || seen[root] {
 			continue
 		}
 		seen[root] = true
-		paths = append(paths, root)
+		pathspecs = append(pathspecs, root)
 	}
-	return paths
+	return pathspecs
+}
+
+// RuntimeArtifactPaths returns deduplicated pathspecs for runtime artifacts in the
+// current uncommitted work. Callers can pass the result to git reset after git add
+// to keep generated state out of safety-net commits.
+func (s *UncommittedWorkStatus) RuntimeArtifactPaths() []string {
+	paths := append(append([]string{}, s.ModifiedFiles...), s.UntrackedFiles...)
+	return RuntimeArtifactPathspecs(paths)
 }
 
 // NonRuntimePaths returns uncommitted paths that are not covered by the runtime

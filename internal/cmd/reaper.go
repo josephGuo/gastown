@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/reaper"
 	"github.com/steveyegge/gastown/internal/style"
 )
@@ -38,6 +39,31 @@ func reaperDatabaseNames() []string {
 		}
 	}
 	return databases
+}
+
+func defaultReaperEndpoint() (string, int) {
+	host := agentconfig.ResolveDoltHost("")
+	port := 0
+	if p := os.Getenv("GT_DOLT_PORT"); p != "" {
+		if v, err := strconv.Atoi(p); err == nil && v > 0 {
+			port = v
+		}
+	}
+	if townRoot, err := findTownRoot(); err == nil {
+		if host == "" {
+			host = agentconfig.ResolveDoltHost(townRoot)
+		}
+		if port == 0 {
+			port = agentconfig.ResolveDoltPort(townRoot)
+		}
+	}
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	if port == 0 {
+		port = 3307
+	}
+	return host, port
 }
 
 func waitBeforeReaperDatabase(index int) error {
@@ -573,23 +599,10 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 
 func init() {
 	// Shared flags
-	// GH#2601: Default host/port from env vars for non-localhost setups.
-	defaultHost := "127.0.0.1"
-	if h := os.Getenv("GT_DOLT_HOST"); h != "" {
-		defaultHost = h
-	} else if h := os.Getenv("BEADS_DOLT_SERVER_HOST"); h != "" {
-		defaultHost = h
-	}
-	defaultPort := 3307
-	if p := os.Getenv("GT_DOLT_PORT"); p != "" {
-		if v, err := strconv.Atoi(p); err == nil {
-			defaultPort = v
-		}
-	} else if p := os.Getenv("BEADS_DOLT_SERVER_PORT"); p != "" {
-		if v, err := strconv.Atoi(p); err == nil {
-			defaultPort = v
-		}
-	}
+	// GH#2601: Default host/port from GT/town config for non-localhost setups.
+	// BEADS_DOLT_* aliases are intentionally ignored because they are derived bd
+	// client outputs, not endpoint authority.
+	defaultHost, defaultPort := defaultReaperEndpoint()
 
 	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperRunCmd, reaperDatabasesCmd} {
 		cmd.Flags().StringVar(&reaperDB, "db", "", "Database name (required for single-db commands)")
