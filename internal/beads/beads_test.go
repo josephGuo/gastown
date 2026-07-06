@@ -77,6 +77,26 @@ func TestListEphemeralQuotesQueryValuesAndDisablesLimit(t *testing.T) {
 	}
 }
 
+func TestListIssueStatusesUsesSingleQuery(t *testing.T) {
+	ResetBdAllowStaleCacheForTest()
+	logPath := installMockBDRecorder(t)
+
+	b := New(t.TempDir())
+	_, err := b.ListIssueStatuses(IssueStatusHooked, StatusInProgress, StatusOpen, StatusOpen)
+	if err != nil {
+		t.Fatalf("ListIssueStatuses() error = %v", err)
+	}
+
+	logOutput := readMockBDLog(t, logPath)
+	want := `query --json ephemeral=false AND (status="hooked" OR status="in_progress" OR status="open") --all --limit=0`
+	if !strings.Contains(logOutput, want) {
+		t.Fatalf("bd log missing %q\nlog:\n%s", want, logOutput)
+	}
+	if count := strings.Count(logOutput, "query --json"); count != 1 {
+		t.Fatalf("query count = %d, want 1\nlog:\n%s", count, logOutput)
+	}
+}
+
 // TestCreateOptions verifies CreateOptions fields.
 func TestCreateOptions(t *testing.T) {
 	opts := CreateOptions{

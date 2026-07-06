@@ -1006,6 +1006,61 @@ func (b *Beads) List(opts ListOptions) ([]*Issue, error) {
 	return issues, nil
 }
 
+// ListIssueStatuses returns durable issues matching any of the supplied
+// statuses with one bd query. Summary paths use this to avoid multiplying bd
+// subprocesses by status and polecat count.
+func (b *Beads) ListIssueStatuses(statuses ...IssueStatus) ([]*Issue, error) {
+	if len(statuses) == 0 {
+		return nil, nil
+	}
+	unique := make([]IssueStatus, 0, len(statuses))
+	seen := make(map[IssueStatus]bool, len(statuses))
+	for _, status := range statuses {
+		if status == "" || seen[status] {
+			continue
+		}
+		seen[status] = true
+		unique = append(unique, status)
+	}
+	if len(unique) == 0 {
+		return nil, nil
+	}
+
+	if b.store != nil {
+		var all []*Issue
+		for _, status := range unique {
+			issues, err := b.storeList(ListOptions{Status: string(status), Priority: -1})
+			if err != nil {
+				return nil, err
+			}
+			all = append(all, issues...)
+		}
+		return all, nil
+	}
+
+	statusClauses := make([]string, 0, len(unique))
+	for _, status := range unique {
+		statusClauses = append(statusClauses, "status="+quoteBDQueryValue(string(status)))
+	}
+	expr := "ephemeral=false AND (" + strings.Join(statusClauses, " OR ") + ")"
+	out, err := b.run("query", "--json", expr, "--all", "--limit=0")
+	if err != nil {
+		return nil, err
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	if !isJSONBytes(out) {
+		return nil, fmt.Errorf("bd query returned non-JSON output")
+	}
+
+	var issues []*Issue
+	if err := json.Unmarshal(out, &issues); err != nil {
+		return nil, fmt.Errorf("parsing bd query output: %w", err)
+	}
+	return issues, nil
+}
+
 // listEphemeral searches the wisps table using "bd query" with ephemeral=true.
 // This is necessary because "bd list" only searches the issues table and does
 // not support an --ephemeral flag. Wisps (ephemeral issues like merge-request

@@ -75,6 +75,7 @@ const (
 	StatusInProgress IssueStatus = "in_progress"
 	StatusTombstone  IssueStatus = "tombstone"
 	StatusBlocked    IssueStatus = "blocked"
+	StatusDeferred   IssueStatus = "deferred"
 	// StatusPinned and StatusHooked are defined as untyped string constants in
 	// handoff.go. Use IssueStatusPinned/IssueStatusHooked for typed comparisons.
 	IssueStatusPinned IssueStatus = "pinned"

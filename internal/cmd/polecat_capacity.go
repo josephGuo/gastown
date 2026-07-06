@@ -5,17 +5,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
-	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
-	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
@@ -32,10 +30,31 @@ type polecatCapacitySnapshot struct {
 	Reservations    int `json:"reservations"`
 	Free            int `json:"free"`
 	ActiveSessions  int `json:"active_sessions"`
+	capacityUsed    int
 }
 
 func (s polecatCapacitySnapshot) occupied() int {
-	return s.Working + s.RecoveryBlocked + s.Reservations
+	return s.capacityUsed + s.Reservations
+}
+
+func (s *polecatCapacitySnapshot) addWorking() {
+	s.Working++
+	s.capacityUsed++
+}
+
+func (s *polecatCapacitySnapshot) addRecoveryBlocked(countsTowardCapacity bool) {
+	s.RecoveryBlocked++
+	if countsTowardCapacity {
+		s.capacityUsed++
+	}
+}
+
+func (s *polecatCapacitySnapshot) addReusableIdle() {
+	s.ReusableIdle++
+}
+
+func (s *polecatCapacitySnapshot) addPendingMR() {
+	s.PendingMR++
 }
 
 type polecatAdmissionReservation struct {
@@ -172,9 +191,17 @@ func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySn
 	}
 
 	tmuxClient := tmux.NewTmux()
+	sessionNames, err := tmuxClient.ListSessions()
+	if err != nil {
+		return snapshot, fmt.Errorf("listing tmux sessions for polecat capacity: %w", err)
+	}
+	sessions := newPolecatSessionSet(sessionNames)
 	for rigName := range rigsConfig.Rigs {
 		rigPath := filepath.Join(townRoot, rigName)
 		if _, err := os.Stat(rigPath); err != nil {
+			if !os.IsNotExist(err) {
+				return snapshot, fmt.Errorf("stat rig path for %s capacity: %w", rigName, err)
+			}
 			continue
 		}
 		polecatNames, err := listPolecatDirectoryNames(rigPath)
@@ -185,20 +212,21 @@ func polecatCapacitySnapshotForTownNoCleanup(townRoot string) (polecatCapacitySn
 			continue
 		}
 
-		agents, err := beads.New(rigPath).ListAgentBeads()
+		rigBeads := beads.New(rigPath)
+		agents, err := rigBeads.ListAgentBeads()
 		if err != nil {
 			return snapshot, fmt.Errorf("listing agent beads for %s capacity: %w", rigName, err)
+		}
+		activeWork, err := listActivePolecatWorkByName(rigBeads, rigName)
+		if err != nil {
+			return snapshot, fmt.Errorf("listing active polecat work for %s capacity: %w", rigName, err)
 		}
 		prefix := beads.GetPrefixForRig(townRoot, rigName)
 		for _, name := range polecatNames {
 			agentID := beads.PolecatBeadIDWithPrefix(prefix, rigName, name)
 			issue := agents[agentID]
-			fields := (*beads.AgentFields)(nil)
-			if issue != nil {
-				fields = beads.ParseAgentFields(issue.Description)
-				fields.AgentState = beads.ResolveAgentState(issue.Description, issue.AgentState)
-			}
-			applyAgentFieldsToCapacitySnapshot(&snapshot, rigPath, rigName, name, fields, tmuxClient)
+			fields := parsePolecatAgentFields(issue)
+			applyAgentFieldsToCapacitySnapshot(&snapshot, rigName, name, fields, activeWork[name], sessions)
 		}
 	}
 
@@ -230,97 +258,35 @@ func listPolecatDirectoryNames(rigPath string) ([]string, error) {
 			names = append(names, entry.Name())
 		}
 	}
+	sort.Strings(names)
 	return names, nil
 }
 
-func applyAgentFieldsToCapacitySnapshot(snapshot *polecatCapacitySnapshot, rigPath, rigName, polecatName string, fields *beads.AgentFields, tmuxClient *tmux.Tmux) {
-	running := false
-	if tmuxClient != nil {
-		running, _ = tmuxClient.HasSession(session.PolecatSessionName(session.PrefixFor(rigName), polecatName))
-	}
-	if fields == nil {
-		if running {
-			snapshot.Working++
-		} else {
-			snapshot.RecoveryBlocked++
-		}
-		return
-	}
-
-	state := strings.TrimSpace(fields.AgentState)
-	if state == "working" || state == "spawning" {
-		if running {
-			snapshot.Working++
-		} else {
-			snapshot.RecoveryBlocked++
-		}
-		return
-	}
-	if fields.HookBead != "" {
-		if running {
-			snapshot.Working++
-		} else if applyCanonicalCapacitySnapshot(snapshot, rigPath, rigName, polecatName, fields, tmuxClient) {
-			return
-		} else {
-			snapshot.RecoveryBlocked++
-		}
-		return
-	}
-	if fields.PushFailed || fields.MRFailed {
-		snapshot.RecoveryBlocked++
-		return
-	}
-	if fields.ActiveMR != "" || (fields.CleanupStatus != "" && fields.CleanupStatus != "clean") {
-		if applyCanonicalCapacitySnapshot(snapshot, rigPath, rigName, polecatName, fields, tmuxClient) {
-			return
-		}
-	}
-	if fields.ActiveMR != "" {
-		snapshot.PendingMR++
-		return
-	}
-	if fields.CleanupStatus == "clean" || state == "nuked" {
-		snapshot.ReusableIdle++
-		return
-	}
-	snapshot.RecoveryBlocked++
-}
-
-func applyCanonicalCapacitySnapshot(snapshot *polecatCapacitySnapshot, rigPath, rigName, polecatName string, fields *beads.AgentFields, tmuxClient *tmux.Tmux) bool {
-	if snapshot == nil || fields == nil || rigPath == "" {
-		return false
-	}
-	state := polecat.State(strings.TrimSpace(fields.AgentState))
-	if state == "" {
-		state = polecat.StateIdle
-	}
-	issueID := fields.LastSourceIssue
-	if issueID == "" {
-		issueID = fields.HookBead
-	}
-	mgr := polecat.NewManager(&rig.Rig{Name: rigName, Path: rigPath}, git.NewGit(rigPath), tmuxClient)
-	disposition := mgr.WorkstateDispositionForPolecat(polecatName, state, issueID)
-	applyWorkstateDispositionToCapacitySnapshot(snapshot, state, disposition)
-	return true
+func applyAgentFieldsToCapacitySnapshot(snapshot *polecatCapacitySnapshot, rigName, polecatName string, fields *beads.AgentFields, activeWork *beads.Issue, sessions polecatSessionSet) {
+	item := buildPolecatInventoryItem(rigName, polecatName, fields, activeWork, sessions)
+	applyWorkstateDispositionToCapacitySnapshot(snapshot, item.State, item.Disposition)
 }
 
 func applyWorkstateDispositionToCapacitySnapshot(snapshot *polecatCapacitySnapshot, state polecat.State, disposition polecat.WorkstateDisposition) {
 	if disposition.ReuseStatus == "idle-pr-open" {
-		snapshot.PendingMR++
+		snapshot.addPendingMR()
 		return
 	}
 	if disposition.Reusable {
-		snapshot.ReusableIdle++
+		snapshot.addReusableIdle()
 		return
 	}
-	if !disposition.CountsTowardCapacity {
+	if disposition.NeedsRecovery {
+		snapshot.addRecoveryBlocked(disposition.CountsTowardCapacity)
 		return
 	}
 	if state == polecat.StateWorking || disposition.Verdict == polecat.WorkstateVerdictWorking {
-		snapshot.Working++
+		snapshot.addWorking()
 		return
 	}
-	snapshot.RecoveryBlocked++
+	if disposition.CountsTowardCapacity {
+		snapshot.addRecoveryBlocked(true)
+	}
 }
 
 func acquirePolecatAdmissionLock(townRoot string) (*flock.Flock, error) {
