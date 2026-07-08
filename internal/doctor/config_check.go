@@ -683,10 +683,35 @@ func (c *CustomTypesCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	if len(missing) == 0 {
+		infraCmd := exec.Command("bd", "config", "get", "types.infra")
+		infraCmd.Dir = beadsDir
+		infraCmd.Env = doctorConfigEnv(beadsDir)
+		infraOutput, infraErr := infraCmd.Output()
+		configuredInfra := parseConfigOutput(infraOutput)
+		if infraErr != nil || configuredInfra != constants.BeadsInfraTypes {
+			c.targetBeadsDir = beadsDir
+			details := []string{
+				fmt.Sprintf("Configured infra types: %s", configuredInfra),
+				fmt.Sprintf("Required infra types: %s", constants.BeadsInfraTypes),
+			}
+			for _, typ := range strings.Split(configuredInfra, ",") {
+				if strings.TrimSpace(typ) == "rig" {
+					details = append(details, "rig must not be an infra type; rig identity beads are durable")
+					break
+				}
+			}
+			return &CheckResult{
+				Name:    c.Name(),
+				Status:  StatusWarning,
+				Message: "Infra types not configured for durable rig identity beads",
+				Details: details,
+				FixHint: "Run 'gt doctor --fix' to register infra types",
+			}
+		}
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusOK,
-			Message: "All custom types registered",
+			Message: "All custom and infra types registered",
 		}
 	}
 
@@ -746,6 +771,13 @@ func (c *CustomTypesCheck) Fix(ctx *CheckContext) error {
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("bd config set types.custom: %s", strings.TrimSpace(string(output)))
+	}
+	infraCmd := exec.Command("bd", "config", "set", "types.infra", constants.BeadsInfraTypes)
+	infraCmd.Dir = c.targetBeadsDir
+	infraCmd.Env = doctorConfigEnv(c.targetBeadsDir)
+	infraOutput, err := infraCmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("bd config set types.infra: %s", strings.TrimSpace(string(infraOutput)))
 	}
 	return nil
 }

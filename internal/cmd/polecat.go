@@ -1062,7 +1062,7 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 	}
 	beadTerminal := isAssignedBeadTerminal(bd, status.Issue)
 	workTerminal := beadTerminal
-	targetRefs := recoveryTargetRefs(bd, status.Issue, status.ActiveMR, status.Branch)
+	targetRefs, targetRefLookupFailed := recoveryTargetRefs(bd, status.Issue, status.ActiveMR, status.Branch)
 	input := polecat.WorkstateInput{State: p.State, CleanupStatus: polecat.CleanupUnknown, Branch: p.Branch}
 	var gitState *GitState
 	var gitErr error
@@ -1099,12 +1099,12 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 		// Use cleanup_status from agent bead, then overlay direct git and MQ facts.
 		input.CleanupStatus = polecat.CleanupStatus(fields.CleanupStatus)
 		status.ActiveMR = fields.ActiveMR
-		targetRefs = recoveryTargetRefs(bd, status.Issue, status.ActiveMR, status.Branch)
 		input.ActiveMR = fields.ActiveMR
 		hookBead := agentHookBead(agentIssue, fields)
 		hookSafe, hookTerminal, hookBlocker := hookBeadSafeForCleanup(bd, hookBead)
 		workTerminal = beadTerminal || hookTerminal
 		sourceHint := agentSourceIssueHint(status.Issue, fields)
+		targetRefs, targetRefLookupFailed = recoveryTargetRefs(bd, status.Issue, status.ActiveMR, status.Branch, sourceHint)
 		if status.Issue == "" && sourceHint != "" {
 			status.Issue = sourceHint
 		}
@@ -1160,7 +1160,7 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 	}
 
 	status.CleanupStatus = input.CleanupStatus
-	applyMQFactsToWorkstateInput(&input, &status, bd, workTerminal, p.ClonePath, targetRefs, gitState, gitErr)
+	applyMQFactsToWorkstateInput(&input, &status, bd, workTerminal, p.ClonePath, targetRefs, targetRefLookupFailed, gitState, gitErr)
 	disposition := polecat.DecideWorkstate(input)
 	applyWorkstateDispositionToRecoveryStatus(&status, disposition)
 
@@ -1255,7 +1255,7 @@ func applyGitStateToWorkstateInput(input *polecat.WorkstateInput, worktreePath s
 	}
 }
 
-func applyMQFactsToWorkstateInput(input *polecat.WorkstateInput, status *RecoveryStatus, bd *beads.Beads, beadTerminal bool, worktreePath string, targetRefs []string, gitState *GitState, gitErr error) {
+func applyMQFactsToWorkstateInput(input *polecat.WorkstateInput, status *RecoveryStatus, bd *beads.Beads, beadTerminal bool, worktreePath string, targetRefs []string, targetRefLookupFailed bool, gitState *GitState, gitErr error) {
 	if status.Branch == "" {
 		return
 	}
@@ -1263,6 +1263,9 @@ func applyMQFactsToWorkstateInput(input *polecat.WorkstateInput, status *Recover
 	input.AssignedBeadTerminal = beadTerminal
 	input.HasSubmittableWork = hasSubmittableWorkForRecovery(worktreePath, targetRefs, gitState, gitErr)
 	input.MQNotRequired = isMQNotRequiredSource(bd, status.Issue)
+	if targetRefLookupFailed {
+		input.MQLookupFailed = true
+	}
 	if !input.HasSubmittableWork || input.MQNotRequired || input.AssignedBeadTerminal {
 		return
 	}
@@ -1488,8 +1491,9 @@ func isRecoveryBaseBranch(branch string) bool {
 	return branch == "main" || branch == "master" || strings.HasPrefix(branch, "integration/")
 }
 
-func recoveryTargetRefs(bd *beads.Beads, issueID, activeMR, branch string) []string {
+func recoveryTargetRefs(bd *beads.Beads, issueID, activeMR, branch string, extraIssueIDs ...string) ([]string, bool) {
 	var refs []string
+	lookupFailed := false
 	appendMRTarget := func(issue *beads.Issue) {
 		if fields := beads.ParseMRFields(issue); fields != nil && fields.Target != "" {
 			refs = append(refs, fields.Target)
@@ -1499,20 +1503,29 @@ func recoveryTargetRefs(bd *beads.Beads, issueID, activeMR, branch string) []str
 		if activeMR != "" {
 			if issue, err := bd.Show(activeMR); err == nil {
 				appendMRTarget(issue)
+			} else if !errors.Is(err, beads.ErrNotFound) {
+				lookupFailed = true
 			}
 		}
 		if branch != "" {
 			if issue, err := bd.FindMRForBranchAny(branch); err == nil {
 				appendMRTarget(issue)
+			} else if !errors.Is(err, beads.ErrNotFound) {
+				lookupFailed = true
 			}
 		}
-		if issueID != "" {
-			if issue, err := bd.Show(issueID); err == nil {
+		for _, candidateIssueID := range append([]string{issueID}, extraIssueIDs...) {
+			if candidateIssueID == "" {
+				continue
+			}
+			if issue, err := bd.Show(candidateIssueID); err == nil {
 				appendAttachmentTargets(&refs, bd, issue)
+			} else {
+				lookupFailed = true
 			}
 		}
 	}
-	return uniqueStrings(refs)
+	return uniqueStrings(refs), lookupFailed
 }
 
 func appendAttachmentTargets(refs *[]string, bd *beads.Beads, issue *beads.Issue) {

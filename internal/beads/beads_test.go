@@ -97,6 +97,35 @@ func TestListIssueStatusesUsesSingleQuery(t *testing.T) {
 	}
 }
 
+func TestListDurableUsesBDListFilters(t *testing.T) {
+	ResetBdAllowStaleCacheForTest()
+	logPath := installMockBDRecorder(t)
+
+	b := New(t.TempDir())
+	_, err := b.List(ListOptions{
+		Status:   StatusHooked,
+		Assignee: "gastown/polecats/toast",
+		Parent:   "gt-wisp/root",
+		Priority: -1,
+		Limit:    3,
+	})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+
+	logOutput := readMockBDLog(t, logPath)
+	for _, want := range []string{
+		"list --json --status=hooked --parent=gt-wisp/root --assignee=gastown/polecats/toast --limit=3",
+	} {
+		if !strings.Contains(logOutput, want) {
+			t.Fatalf("bd log missing %q\nlog:\n%s", want, logOutput)
+		}
+	}
+	if strings.Contains(logOutput, "sql --json") {
+		t.Fatalf("List() should not use raw SQL\nlog:\n%s", logOutput)
+	}
+}
+
 // TestCreateOptions verifies CreateOptions fields.
 func TestCreateOptions(t *testing.T) {
 	opts := CreateOptions{

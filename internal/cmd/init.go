@@ -172,18 +172,23 @@ func registerCustomTypes(workDir string) error {
 		return nil // no beads DB yet, skip silently
 	}
 
-	// Try to set custom types
-	cmd := exec.Command("bd", "config", "set", "types.custom", constants.BeadsCustomTypes)
-	cmd.Dir = workDir
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		// Check for common expected errors
-		outStr := string(output)
-		if strings.Contains(outStr, "not initialized") ||
-			strings.Contains(outStr, "no such file") {
-			return nil // DB not initialized, skip silently
+	// Try to set Gas Town type config.
+	for _, cfg := range []struct{ key, value string }{
+		{"types.custom", constants.BeadsCustomTypes},
+		{"types.infra", constants.BeadsInfraTypes},
+	} {
+		cmd := exec.Command("bd", "config", "set", cfg.key, cfg.value)
+		cmd.Dir = workDir
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			// Check for common expected errors
+			outStr := string(output)
+			if strings.Contains(outStr, "not initialized") ||
+				strings.Contains(outStr, "no such file") {
+				return nil // DB not initialized, skip silently
+			}
+			return fmt.Errorf("%s", strings.TrimSpace(outStr))
 		}
-		return fmt.Errorf("%s", strings.TrimSpace(outStr))
 	}
 	return nil
 }

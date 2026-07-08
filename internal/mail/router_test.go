@@ -183,6 +183,9 @@ func TestAddressToSessionIDs(t *testing.T) {
 		{"mayor", []string{"hq-mayor"}},
 		{"mayor/", []string{"hq-mayor"}},
 		{"deacon", []string{"hq-deacon"}},
+		{"deacon/", []string{"hq-deacon"}},
+		{"deacon/dogs/alpha", []string{"hq-dog-alpha"}},
+		{"deacon/dogs/my-dog", []string{"hq-dog-my-dog"}},
 
 		// Rig singletons - single session (no crew/polecat ambiguity)
 		{"gastown/refinery", []string{"gt-refinery"}},
@@ -201,6 +204,14 @@ func TestAddressToSessionIDs(t *testing.T) {
 		{"gastown/", nil}, // Empty target
 		{"gastown", nil},  // No slash
 		{"", nil},         // Empty address
+		{"deacon/dogs", nil},
+		{"deacon/dogs/", nil},
+		{"deacon/dogs/alpha/extra", nil},
+		{"deacon/dogs/..", nil},
+		{"deacon/foo", nil},
+		{"deaconer", nil},
+		{"mayor/foo", nil},
+		{"mayorer", nil},
 	}
 
 	for _, tt := range tests {
@@ -374,8 +385,7 @@ func TestSendFromCrewWorkspace_AvoidsEphemeralPrefixMismatch(t *testing.T) {
 	}
 
 	// Write sentinel files so beads.EnsureCustomTypes skips bd config calls.
-	typesList := strings.Join(constants.BeadsCustomTypesList(), ",")
-	if err := os.WriteFile(filepath.Join(townBeadsDir, ".gt-types-configured"), []byte(typesList+"\n"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(townBeadsDir, ".gt-types-configured"), []byte(beads.TypeConfigSentinelValue()+"\n"), 0644); err != nil {
 		t.Fatalf("write types sentinel: %v", err)
 	}
 
@@ -1010,6 +1020,13 @@ func TestAgentBeadToAddress(t *testing.T) {
 			bead: &agentBead{
 				ID: "hq-dog-bravo",
 			},
+			want: "deacon/dogs/bravo",
+		},
+		{
+			name: "malformed hq-dog returns empty",
+			bead: &agentBead{
+				ID: "hq-dog",
+			},
 			want: "",
 		},
 		{
@@ -1212,9 +1229,12 @@ func TestValidateRecipient(t *testing.T) {
 	beadsDB := filepath.Join(beadsDir, "beads.db")
 	t.Setenv("BEADS_DB", beadsDB)
 
-	// Register custom types required for agent beads.
-	if _, err := b.Run("config", "set", "types.custom", "agent,role,rig,convoy,slot,queue,event,message,molecule,gate,merge-request"); err != nil {
+	// Register type config required for agent beads.
+	if _, err := b.Run("config", "set", "types.custom", constants.BeadsCustomTypes); err != nil {
 		t.Fatalf("config set types.custom: %v", err)
+	}
+	if _, err := b.Run("config", "set", "types.infra", constants.BeadsInfraTypes); err != nil {
+		t.Fatalf("config set types.infra: %v", err)
 	}
 
 	// Create test agent beads with gt:agent label.
@@ -1306,6 +1326,11 @@ func TestValidateAgentWorkspaceDog(t *testing.T) {
 	}{
 		{"dog exists", "deacon/dogs/fido", true},
 		{"dog not exists", "deacon/dogs/ghost", false},
+		{"dog pool is not mailbox", "deacon/dogs", false},
+		{"empty dog name", "deacon/dogs/", false},
+		{"nested dog path", "deacon/dogs/fido/extra", false},
+		{"dot dog name", "deacon/dogs/.", false},
+		{"dotdot dog name", "deacon/dogs/..", false},
 		{"not a dog path", "deacon/cats/fido", false},
 	}
 
@@ -1358,6 +1383,21 @@ func TestAddressToAgentBeadID(t *testing.T) {
 			expected: "hq-deacon",
 		},
 		{
+			name:     "deacon without slash",
+			address:  "deacon",
+			expected: "hq-deacon",
+		},
+		{
+			name:     "dog",
+			address:  "deacon/dogs/alpha",
+			expected: "hq-dog-alpha",
+		},
+		{
+			name:     "hyphenated dog",
+			address:  "deacon/dogs/my-dog",
+			expected: "hq-dog-my-dog",
+		},
+		{
 			name:     "witness",
 			address:  "gastown/witness",
 			expected: "gt-witness",
@@ -1395,6 +1435,41 @@ func TestAddressToAgentBeadID(t *testing.T) {
 		{
 			name:     "rig with empty target",
 			address:  "gastown/",
+			expected: "",
+		},
+		{
+			name:     "dog pool is not agent bead",
+			address:  "deacon/dogs",
+			expected: "",
+		},
+		{
+			name:     "empty dog name is not agent bead",
+			address:  "deacon/dogs/",
+			expected: "",
+		},
+		{
+			name:     "nested dog path is not agent bead",
+			address:  "deacon/dogs/alpha/extra",
+			expected: "",
+		},
+		{
+			name:     "unknown deacon subpath is not deacon",
+			address:  "deacon/foo",
+			expected: "",
+		},
+		{
+			name:     "deacon prefix is not deacon",
+			address:  "deaconer",
+			expected: "",
+		},
+		{
+			name:     "unknown mayor subpath is not mayor",
+			address:  "mayor/foo",
+			expected: "",
+		},
+		{
+			name:     "mayor prefix is not mayor",
+			address:  "mayorer",
 			expected: "",
 		},
 	}
@@ -1805,6 +1880,45 @@ func TestNotifyRecipient_CanonicalAliasQueuesAllHeadlessCandidates(t *testing.T)
 	}
 }
 
+func TestNotifyRecipient_DogQueuesDogSessionNotDeacon(t *testing.T) {
+	townRoot := t.TempDir()
+	r := &Router{
+		workDir:  t.TempDir(),
+		townRoot: townRoot,
+		tmux:     tmux.NewTmuxWithSocket("gt-test-missing-socket"),
+	}
+
+	msg := &Message{
+		From:     "mayor/",
+		To:       "deacon/dogs/fido",
+		Subject:  "dog delivery",
+		ThreadID: "thread-dog-delivery",
+	}
+
+	if err := r.notifyRecipient(msg); err != nil {
+		t.Fatalf("notifyRecipient returned error: %v", err)
+	}
+
+	dogNudges, err := nudge.Drain(townRoot, "hq-dog-fido")
+	if err != nil {
+		t.Fatalf("Drain(hq-dog-fido): %v", err)
+	}
+	if len(dogNudges) != 1 {
+		t.Fatalf("Drain(hq-dog-fido) returned %d nudges, want 1", len(dogNudges))
+	}
+	if dogNudges[0].ThreadID != msg.ThreadID {
+		t.Fatalf("dog nudge ThreadID = %q, want %q", dogNudges[0].ThreadID, msg.ThreadID)
+	}
+
+	deaconNudges, err := nudge.Drain(townRoot, "hq-deacon")
+	if err != nil {
+		t.Fatalf("Drain(hq-deacon): %v", err)
+	}
+	if len(deaconNudges) != 0 {
+		t.Fatalf("Drain(hq-deacon) returned %d nudges, want 0", len(deaconNudges))
+	}
+}
+
 func TestNotifyRecipient_BusyAgentEscalationUsesUrgentQueuedNudge(t *testing.T) {
 	socket := requireNotifyTestSocket(t)
 	sessionName := "gt-crew-busy-escalation"
@@ -1965,6 +2079,113 @@ func TestEnqueueReplyReminder_Basic(t *testing.T) {
 	}
 	if q.ThreadID != msg.ThreadID {
 		t.Errorf("ThreadID = %q, want %q", q.ThreadID, msg.ThreadID)
+	}
+}
+
+func TestEnqueueReplyReminder_SkipsUnreplyableSender(t *testing.T) {
+	for _, from := range []string{"gt-sling", "sling", "gt-done", "system", "daemon", "unknown"} {
+		t.Run(from, func(t *testing.T) {
+			townRoot := t.TempDir()
+			r := &Router{workDir: t.TempDir(), townRoot: townRoot}
+			msg := &Message{
+				From:    from,
+				To:      "gastown/witness",
+				Subject: "LIFECYCLE:Shutdown guzzle",
+				Type:    TypeTask,
+			}
+			sessionID := session.WitnessSessionName(session.PrefixFor("gastown"))
+
+			r.enqueueReplyReminder(msg, sessionID)
+
+			pending, err := nudge.Pending(townRoot, sessionID)
+			if err != nil {
+				t.Fatalf("Pending: %v", err)
+			}
+			if pending != 0 {
+				t.Fatalf("expected no queued reminders for %q, got %d", from, pending)
+			}
+		})
+	}
+}
+
+func TestEnqueueReplyReminder_RoutableSenderStillQueues(t *testing.T) {
+	for _, from := range []string{"overseer", "mayor/", "deacon/", "gastown/witness", "gastown/refinery", "gastown/crew/alice", "gastown/polecat/rust", "gastown/polecats/rust", "gastown/rust", "deacon/dogs/alpha"} {
+		t.Run(from, func(t *testing.T) {
+			townRoot := t.TempDir()
+			r := &Router{workDir: t.TempDir(), townRoot: townRoot}
+			msg := &Message{
+				From:    from,
+				To:      "gastown/crew/bob",
+				Subject: "status check",
+				Type:    TypeNotification,
+			}
+			sessionID := session.CrewSessionName(session.PrefixFor("gastown"), "bob")
+
+			r.enqueueReplyReminder(msg, sessionID)
+
+			pending, err := nudge.Pending(townRoot, sessionID)
+			if err != nil {
+				t.Fatalf("Pending: %v", err)
+			}
+			if pending != 1 {
+				t.Fatalf("expected one queued reminder for %q, got %d", from, pending)
+			}
+		})
+	}
+}
+
+func TestSenderCanReceiveReply(t *testing.T) {
+	tests := []struct {
+		from string
+		want bool
+	}{
+		{from: "", want: false},
+		{from: " mayor/", want: false},
+		{from: "gt-sling", want: false},
+		{from: "sling", want: false},
+		{from: "sling/", want: false},
+		{from: "gt-done", want: false},
+		{from: "system", want: false},
+		{from: "daemon", want: false},
+		{from: "unknown", want: false},
+		{from: "human", want: false},
+		{from: "alice@example.com", want: false},
+		{from: "@crew", want: false},
+		{from: "queue:reviews", want: false},
+		{from: "mayorx", want: false},
+		{from: "deaconess", want: false},
+		{from: "mayor/extra", want: false},
+		{from: "deacon/extra", want: false},
+		{from: "gastown/crew/", want: false},
+		{from: "gastown/polecat/", want: false},
+		{from: "gastown/polecats/", want: false},
+		{from: "gastown/crew/alice/extra", want: false},
+		{from: "deacon/dogs/", want: false},
+		{from: "deacon/dogs/alpha/extra", want: false},
+		{from: "overseer", want: true},
+		{from: "mayor", want: true},
+		{from: "mayor/", want: true},
+		{from: "deacon", want: true},
+		{from: "deacon/", want: true},
+		{from: "gastown/mayor", want: true},
+		{from: "gastown/deacon", want: true},
+		{from: "gastown/witness", want: true},
+		{from: "gastown/refinery", want: true},
+		{from: "gastown/crew/alice", want: true},
+		{from: "gastown/polecat/rust", want: true},
+		{from: "gastown/polecats/rust", want: true},
+		{from: "gastown/rust", want: true},
+		{from: "gastown/crew/gt-sling", want: true},
+		{from: "gastown/system-bot", want: true},
+		{from: "deacon/dogs/alpha", want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.from, func(t *testing.T) {
+			if got := senderCanReceiveReply(tt.from); got != tt.want {
+				t.Fatalf("senderCanReceiveReply(%q) = %v, want %v", tt.from, got, tt.want)
+			}
+		})
 	}
 }
 

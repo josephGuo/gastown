@@ -59,7 +59,7 @@ type SlingSpawnOptions struct {
 	HookBead      string // Bead ID to set as hook_bead at spawn time (atomic assignment)
 	Agent         string // Agent override for this spawn (e.g., "gemini", "codex", "claude-haiku")
 	BaseBranch    string // Override base branch for polecat worktree (e.g., "develop", "release/v2")
-	ResumeBranch  string // Resume an existing branch (e.g. PR head) instead of creating polecat/<name>/<bead>@<ts>
+	ResumeBranch  string // Resume an existing branch (e.g. PR head) instead of creating polecat/<name>/<bead>+<ts>
 	SkipAdmission bool   // Caller already holds a polecat admission reservation
 }
 

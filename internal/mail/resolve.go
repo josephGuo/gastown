@@ -144,6 +144,12 @@ func (r *Resolver) validateAgentAddress(address string) error {
 	case constants.RoleMayor + "/", constants.RoleMayor, constants.RoleDeacon + "/", constants.RoleDeacon, "overseer":
 		return nil
 	}
+	validDogAddress := false
+	if _, ok := DogAddressName(normalized); ok {
+		validDogAddress = true
+	} else if isReservedTownSubpath(normalized) {
+		return fmt.Errorf("%w: %s", ErrUnknownRecipient, address)
+	}
 
 	parts := strings.SplitN(normalized, "/", 3)
 	if len(parts) < 2 || parts[1] == "" {
@@ -188,7 +194,11 @@ func (r *Resolver) validateAgentAddress(address string) error {
 			}
 		case 3:
 			// Explicit: rig/crew/name or rig/polecats/name
-			if dirExistsAt(filepath.Join(r.townRoot, parts[0], parts[1], parts[2])) {
+			if (parts[1] == constants.RoleCrew || parts[1] == "polecats") &&
+				dirExistsAt(filepath.Join(r.townRoot, parts[0], parts[1], parts[2])) {
+				return nil
+			}
+			if validDogAddress && dirExistsAt(filepath.Join(r.townRoot, parts[0], parts[1], parts[2])) {
 				return nil
 			}
 		}
@@ -464,6 +474,13 @@ func (r *Resolver) resolveChannel(name string) ([]Recipient, error) {
 //   - hq-deacon → deacon/
 //   - gt-gastown-crew-max → gastown/crew/max
 func AgentBeadIDToAddress(id string) string {
+	if addr := dogAddressFromAgentBeadID(id); addr != "" {
+		return addr
+	}
+	if isDogAgentBeadIDWithoutName(id) {
+		return ""
+	}
+
 	var rest string
 
 	// Handle both gt- (rig agents) and hq- (town agents) prefixes
@@ -509,11 +526,7 @@ func AgentBeadIDToAddress(id string) string {
 			return rig + "/" + role
 		case "dog":
 			// Town-level named: gt-dog-alpha
-			if i+1 < len(parts) {
-				name := strings.Join(parts[i+1:], "-")
-				return "dog/" + name
-			}
-			return "dog/"
+			return dogAddressFromParts(parts, i)
 		}
 	}
 

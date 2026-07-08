@@ -27,10 +27,46 @@ func TestParseBranchName(t *testing.T) {
 			wantWorker: "Worker",
 		},
 		{
-			name:       "polecat branch with issue and timestamp",
+			name:       "generated polecat branch with issue and plus suffix",
+			branch:     "polecat/furiosa/gt-jns7.1+mk123456",
+			wantIssue:  "gt-jns7.1",
+			wantWorker: "furiosa",
+		},
+		{
+			name:       "legacy polecat branch with issue and at suffix",
 			branch:     "polecat/furiosa/gt-jns7.1@mk123456",
 			wantIssue:  "gt-jns7.1",
 			wantWorker: "furiosa",
+		},
+		{
+			name:       "generated polecat branch with dashed issue slug",
+			branch:     "polecat/alpha/gt-pin-bd-metadata+mk123456",
+			wantIssue:  "gt-pin-bd-metadata",
+			wantWorker: "alpha",
+		},
+		{
+			name:       "raw polecat branch with dashed issue slug",
+			branch:     "polecat/alpha/gt-pin-bd-metadata",
+			wantIssue:  "gt-pin-bd-metadata",
+			wantWorker: "alpha",
+		},
+		{
+			name:       "generated polecat branch with dotted subtask",
+			branch:     "polecat/alpha/gt-4kp9.5.5.1+mk123456",
+			wantIssue:  "gt-4kp9.5.5.1",
+			wantWorker: "alpha",
+		},
+		{
+			name:       "dash suffix stays part of issue slug",
+			branch:     "polecat/furiosa/gt-jns7.1-mk123456",
+			wantIssue:  "gt-jns7.1-mk123456",
+			wantWorker: "furiosa",
+		},
+		{
+			name:       "malformed polecat branch does not fall back to issue regex",
+			branch:     "polecat/alpha/gt-pin-bd-metadata+",
+			wantIssue:  "",
+			wantWorker: "",
 		},
 		{
 			name:       "modern polecat branch (timestamp format)",
@@ -378,7 +414,7 @@ func TestMRFilteringByLabel(t *testing.T) {
 			issue: &beads.Issue{
 				ID:     "mr-1",
 				Title:  "Merge: test-branch",
-				Type:   "task", // Wrong type (default from bd create)
+				Type:   "task",                       // Wrong type (default from bd create)
 				Labels: []string{"gt:merge-request"}, // Correct label
 			},
 			wantIsMR: true,

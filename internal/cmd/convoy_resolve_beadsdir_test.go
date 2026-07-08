@@ -87,9 +87,8 @@ func TestConvoyResolveBeadsDir_RegressionEmptyConvoy(t *testing.T) {
 		}
 
 		// Put sentinel ONLY in .beads (the correct location).
-		currentTypes := strings.Join(constants.BeadsCustomTypesList(), ",")
 		correctSentinel := filepath.Join(beadsDir, ".gt-types-configured")
-		if err := os.WriteFile(correctSentinel, []byte(currentTypes+"\n"), 0644); err != nil {
+		if err := os.WriteFile(correctSentinel, []byte(beads.TypeConfigSentinelValue()+"\n"), 0644); err != nil {
 			t.Fatal(err)
 		}
 
@@ -131,8 +130,7 @@ func TestConvoyResolveBeadsDir_RegressionEmptyConvoy(t *testing.T) {
 		}
 
 		// Pre-populate sentinel in .beads so we don't need a real bd.
-		currentTypes := strings.Join(constants.BeadsCustomTypesList(), ",")
-		if err := os.WriteFile(filepath.Join(beadsDir, ".gt-types-configured"), []byte(currentTypes+"\n"), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(beadsDir, ".gt-types-configured"), []byte(beads.TypeConfigSentinelValue()+"\n"), 0644); err != nil {
 			t.Fatal(err)
 		}
 
@@ -271,8 +269,7 @@ func TestConvoyCreate_SentinelPlacement(t *testing.T) {
 	}
 
 	// Pre-populate sentinels to avoid needing a real bd binary.
-	currentTypes := strings.Join(constants.BeadsCustomTypesList(), ",")
-	if err := os.WriteFile(filepath.Join(beadsDir, ".gt-types-configured"), []byte(currentTypes+"\n"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(beadsDir, ".gt-types-configured"), []byte(beads.TypeConfigSentinelValue()+"\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	currentStatuses := strings.Join(constants.BeadsCustomStatusesList(), ",")

@@ -301,7 +301,11 @@ func GetRigDirForName(townRoot, rigName string) string {
 		}
 		parts := strings.SplitN(r.Path, "/", 2)
 		if len(parts) > 0 && parts[0] == rigName {
-			return filepath.Join(townRoot, r.Path)
+			rigDir := filepath.Join(townRoot, r.Path)
+			if !pathWithin(townRoot, rigDir) {
+				continue
+			}
+			return rigDir
 		}
 	}
 	return ""

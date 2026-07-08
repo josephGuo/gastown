@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/mayor"
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/session"
@@ -519,6 +520,32 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 		_ = events.LogFeed(events.TypeNudge, sender, events.NudgePayload("", constants.RoleDeacon, message))
 		return nil
 	}
+	if dogName, ok := mail.DogAddressName(target); ok {
+		sessionName := session.DogSessionName(dogName)
+		if nudgeModeFlag != NudgeModeImmediate && !hasACPSessionByName(townRoot, sessionName) {
+			exists, err := t.HasSession(sessionName)
+			if err != nil {
+				return fmt.Errorf("checking dog session: %w", err)
+			}
+			if !exists {
+				return fmt.Errorf("session %q not found (cannot queue nudge for nonexistent session)", sessionName)
+			}
+		}
+
+		if err := deliverNudge(t, sessionName, message, sender); err != nil {
+			return fmt.Errorf("nudging dog: %w", err)
+		}
+
+		fmt.Printf("%s Nudged %s (%s)\n", style.Bold.Render("✓"), target, nudgeModeFlag)
+		if townRoot, err := workspace.FindFromCwd(); err == nil && townRoot != "" {
+			_ = LogNudge(townRoot, target, message)
+		}
+		_ = events.LogFeed(events.TypeNudge, sender, events.NudgePayload("", target, message))
+		return nil
+	}
+	if strings.HasPrefix(target, constants.RoleMayor+"/") || strings.HasPrefix(target, constants.RoleDeacon+"/") {
+		return fmt.Errorf("invalid town target %q", target)
+	}
 
 	// Check if target is rig/polecat format or raw session name
 	if strings.Contains(target, "/") {
@@ -849,6 +876,8 @@ func sessionNameToAddress(sessionName string) string {
 		return constants.RoleMayor
 	case session.RoleDeacon:
 		return constants.RoleDeacon
+	case session.RoleDog:
+		return mail.DogAddress(identity.Name)
 	case session.RoleWitness:
 		return fmt.Sprintf("%s/witness", identity.Rig)
 	case session.RoleRefinery:
@@ -871,12 +900,18 @@ func sessionNameToAddress(sessionName string) string {
 //
 // Returns empty string if the address cannot be converted.
 func addressToAgentBeadID(address string) string {
+	if dogName, ok := mail.DogAddressName(address); ok {
+		return session.DogSessionName(dogName)
+	}
 	// Handle special cases
 	switch address {
-	case constants.RoleMayor:
+	case constants.RoleMayor, constants.RoleMayor + "/":
 		return session.MayorSessionName()
-	case constants.RoleDeacon:
+	case constants.RoleDeacon, constants.RoleDeacon + "/":
 		return session.DeaconSessionName()
+	}
+	if strings.HasPrefix(address, constants.RoleMayor+"/") || strings.HasPrefix(address, constants.RoleDeacon+"/") {
+		return ""
 	}
 
 	// Parse rig/role format

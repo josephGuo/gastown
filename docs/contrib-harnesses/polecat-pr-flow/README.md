@@ -75,14 +75,14 @@ and adapt it. The point is a starting template, not a drop-in product.
 
 ## Fixing an existing PR (gh#3602)
 
-By default `gt sling` creates a fresh `polecat/<name>/<bead>@<ts>` branch from
+By default `gt sling` creates a fresh `polecat/<name>/<bead>+<ts>` branch from
 `main`, which means re-slinging a bead with an existing open PR opens a
 **duplicate** PR rather than reusing the original. To resume an existing PR
 branch, use `--branch` or `--pr`:
 
 ```bash
 # Resume by branch name (works for any open or stashed branch)
-gt sling <bead> <rig> --branch polecat/example/gh-1234@abcdef
+gt sling <bead> <rig> --branch polecat/example/gh-1234+abcdef
 
 # Resume by PR number (resolves the head ref via `gh pr view`)
 gt sling <bead> <rig> --pr 1234

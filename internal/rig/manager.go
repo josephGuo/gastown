@@ -707,11 +707,13 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 				fmt.Printf("  Warning: Could not set issue-prefix in config.yaml: %v\n", err)
 			}
 			_ = beads.EnsureConfigYAMLValue(resolvedBeadsDir, "types.custom", constants.BeadsCustomTypes)
+			_ = beads.EnsureConfigYAMLValue(resolvedBeadsDir, "types.infra", constants.BeadsInfraTypes)
 		}
 		if err := beads.EnsureDoltConfigValue(resolvedBeadsDir, "issue_prefix", opts.BeadsPrefix); err != nil {
 			fmt.Printf("  Warning: Could not set issue_prefix in rig database: %v\n", err)
 		}
 		_ = beads.EnsureDoltConfigValue(resolvedBeadsDir, "types.custom", constants.BeadsCustomTypes)
+		_ = beads.EnsureDoltConfigValue(resolvedBeadsDir, "types.infra", constants.BeadsInfraTypes)
 	}
 
 	// Auto-create DoltHub remote for the rig's beads database.
@@ -1185,13 +1187,18 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 	} else {
 		// bd init succeeded - configure the Dolt database
 
-		// Configure custom types for Gas Town (agent, role, rig, convoy).
-		// These were extracted from beads core in v0.46.0 and now require explicit config.
-		configCmd := exec.Command("bd", "config", "set", "types.custom", constants.BeadsCustomTypes)
-		configCmd.Dir = rigPath
-		configCmd.Env = filteredEnv
-		// Ignore errors - older beads versions don't need this
-		_, _ = configCmd.CombinedOutput()
+		// Configure Gas Town bead types. Rig remains a custom durable type, not an
+		// infra/wisp type.
+		for _, cfg := range []struct{ key, value string }{
+			{"types.custom", constants.BeadsCustomTypes},
+			{"types.infra", constants.BeadsInfraTypes},
+		} {
+			configCmd := exec.Command("bd", "config", "set", cfg.key, cfg.value)
+			configCmd.Dir = rigPath
+			configCmd.Env = filteredEnv
+			// Ignore errors - older beads versions don't need this
+			_, _ = configCmd.CombinedOutput()
+		}
 
 		// Explicitly set issue_prefix config (bd init --prefix may not persist it in newer versions).
 		// Without this, bd create and gt sling fail with "issue_prefix config is missing".

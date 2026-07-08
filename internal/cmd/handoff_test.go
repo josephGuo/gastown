@@ -23,6 +23,16 @@ func setupHandoffTestRegistry(t *testing.T) {
 	t.Cleanup(func() { session.SetDefaultRegistry(old) })
 }
 
+func TestResolvePathToSessionRejectsUnsafeSegments(t *testing.T) {
+	for _, target := range []string{"../crew/toast", "gastown/../toast", "gastown/crew/..", `gastown\crew\toast`} {
+		t.Run(target, func(t *testing.T) {
+			if _, err := resolvePathToSession(target); err == nil {
+				t.Fatalf("resolvePathToSession(%q) error = nil, want rejection", target)
+			}
+		})
+	}
+}
+
 func TestHandoffStdinFlag(t *testing.T) {
 	t.Run("errors when both stdin and message provided", func(t *testing.T) {
 		// Save and restore flag state

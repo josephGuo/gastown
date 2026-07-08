@@ -51,6 +51,7 @@ import (
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/beads"
 	configpkg "github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/style"
 )
 
@@ -139,6 +140,9 @@ const (
 	DefaultPort           = 3307
 	DefaultUser           = "root" // Default Dolt user (no password for local access)
 	DefaultMaxConnections = 1000   // Dolt default; no reason to limit below (Tim Sehn confirmed 1k is fine)
+
+	defaultDoltSQLServerGoMemLimit = "16GiB"
+	defaultDoltSQLServerGOGC       = "50"
 
 	// DefaultReadTimeoutMs is the server-side timeout for reading a complete request from a client.
 	// Controls how long Dolt waits for a client to send a query on an idle connection.
@@ -461,6 +465,42 @@ func buildDoltSQLCmd(ctx context.Context, config *Config, args ...string) *exec.
 	cmd.Env = append(os.Environ(), "DOLT_CLI_PASSWORD="+config.Password)
 
 	return cmd
+}
+
+// NewSQLServerCommand constructs the managed dolt sql-server process command.
+func NewSQLServerCommand(doltPath, dataDir, configPath string) *exec.Cmd {
+	cmd := exec.Command(doltPath, "sql-server", "--config", configPath)
+	cmd.Dir = dataDir
+	cmd.Env = doltSQLServerEnv(cmd.Environ())
+	return cmd
+}
+
+func doltSQLServerEnv(env []string) []string {
+	return doltSQLServerEnvForGOOS(env, runtime.GOOS)
+}
+
+func doltSQLServerEnvForGOOS(env []string, goos string) []string {
+	out := append([]string(nil), env...)
+	out = appendEnvDefault(out, "GOMEMLIMIT", defaultDoltSQLServerGoMemLimit, goos)
+	out = appendEnvDefault(out, "GOGC", defaultDoltSQLServerGOGC, goos)
+	return out
+}
+
+func appendEnvDefault(env []string, key, value, goos string) []string {
+	for _, entry := range env {
+		entryKey, _, ok := strings.Cut(entry, "=")
+		if ok && envKeyMatches(entryKey, key, goos) {
+			return env
+		}
+	}
+	return append(env, key+"="+value)
+}
+
+func envKeyMatches(entryKey, key, goos string) bool {
+	if goos == "windows" {
+		return strings.EqualFold(entryKey, key)
+	}
+	return entryKey == key
 }
 
 // RigDatabaseDir returns the database directory for a specific rig.
@@ -1830,9 +1870,7 @@ func Start(townRoot string) error {
 		logFile.Close()
 		return fmt.Errorf("writing Dolt config: %w", err)
 	}
-	args := []string{"sql-server", "--config", configPath}
-	cmd := exec.Command("dolt", args...)
-	cmd.Dir = config.DataDir
+	cmd := NewSQLServerCommand("dolt", config.DataDir, configPath)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 
@@ -2635,6 +2673,12 @@ func EnsureRigIssuePrefix(townRoot, rigName string, serverMode bool) error {
 	}
 	if err := beads.EnsureConfigYAML(beadsDir, prefix); err != nil {
 		return fmt.Errorf("ensuring config.yaml: %w", err)
+	}
+	if err := beads.EnsureConfigYAMLValue(beadsDir, "types.custom", constants.BeadsCustomTypes); err != nil {
+		return fmt.Errorf("ensuring types.custom in config.yaml: %w", err)
+	}
+	if err := beads.EnsureConfigYAMLValue(beadsDir, "types.infra", constants.BeadsInfraTypes); err != nil {
+		return fmt.Errorf("ensuring types.infra in config.yaml: %w", err)
 	}
 	if err := EnsureMetadataForBeadsDir(townRoot, beadsDir, rigName, rigName); err != nil {
 		return fmt.Errorf("ensuring metadata.json: %w", err)

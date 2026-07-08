@@ -534,7 +534,7 @@ type AddOptions struct {
 	HookBead   string // Bead ID to set as hook_bead at spawn time (atomic assignment)
 	BaseBranch string // Override base branch for worktree (e.g., "origin/integration/gt-epic")
 	// ResumeBranch reuses an existing branch (typically a PR head) for the polecat
-	// worktree instead of creating a fresh polecat/<name>/<bead>@<ts> branch (gh#3602).
+	// worktree instead of creating a fresh polecat/<name>/<bead>+<ts> branch (gh#3602).
 	// When set, the polecat's branch IS this branch — pushes go back to the same ref,
 	// updating the existing PR. Mutually exclusive with BaseBranch (resume implies its
 	// own start point). When empty, normal fresh-branch behavior is used.
@@ -555,7 +555,7 @@ type AddOptions struct {
 // - {timestamp}: unique timestamp
 //
 // If no template is configured or template is empty, uses default format:
-// - polecat/{name}/{issue}@{timestamp} when issue is available
+// - polecat/{name}/{issue}+{timestamp} when issue is available
 // - polecat/{name}-{timestamp} otherwise
 func (m *Manager) buildBranchName(name, issue string) string {
 	template := m.rig.GetStringConfig("polecat_branch_template")
@@ -563,10 +563,7 @@ func (m *Manager) buildBranchName(name, issue string) string {
 	// No template configured - use default behavior for backward compatibility
 	if template == "" {
 		timestamp := strconv.FormatInt(time.Now().UnixMilli(), 36)
-		if issue != "" {
-			return fmt.Sprintf("polecat/%s/%s@%s", name, issue, timestamp)
-		}
-		return fmt.Sprintf("polecat/%s-%s", name, timestamp)
+		return FormatGeneratedBranchName(name, issue, timestamp)
 	}
 
 	// Build template variables
@@ -1501,7 +1498,7 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 
 	if opts.ResumeBranch != "" {
 		// Resume an existing branch: fetch and attach the temp worktree directly
-		// to the named branch instead of creating a fresh polecat/<name>/<bead>@<ts>.
+		// to the named branch instead of creating a fresh polecat/<name>/<bead>+<ts>.
 		if err := repoGit.FetchBranch("origin", opts.ResumeBranch); err != nil {
 			style.PrintWarning("could not fetch resume branch %s: %v", opts.ResumeBranch, err)
 		}
@@ -1779,7 +1776,7 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 
 	// Create or reset the branch tracking the start point. For resume, the branch
 	// IS opts.ResumeBranch (so pushes go back to the existing PR head). For fresh
-	// work, build a new polecat/<name>/<bead>@<ts> branch.
+	// work, build a new polecat/<name>/<bead>+<ts> branch.
 	branchName := m.buildBranchName(name, opts.HookBead)
 	if opts.ResumeBranch != "" {
 		branchName = opts.ResumeBranch
@@ -2207,8 +2204,6 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 			input.CleanupStatus = CleanupStatus(fields.CleanupStatus)
 		}
 	}
-	targetRefs := m.reuseTargetRefs(fields)
-
 	clonePath := m.clonePath(name)
 	g := git.NewGit(clonePath)
 	branch, branchErr := g.CurrentBranch()
@@ -2216,6 +2211,10 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 		input.GitCheckFailed = true
 	} else {
 		input.Branch = branch
+	}
+	targetRefs, targetRefLookupFailed := m.reuseTargetRefs(fields, branch)
+	if targetRefLookupFailed {
+		input.MQLookupFailed = true
 	}
 	if status, err := g.CheckUncommittedWork(); err == nil {
 		input.GitDirty = !status.CleanExcludingRuntime()
@@ -2250,14 +2249,18 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 			sourceTerminal = true
 		}
 	}
+	workIssue := issue
+	if workIssue == "" {
+		workIssue = sourceHint
+	}
 	input.MQCheckRequired = input.Branch != ""
-	input.HasSubmittableWork = hasSubmittableWorkForWorkstate(clonePath)
-	input.AssignedBeadTerminal = m.assignedBeadTerminal(issue)
+	input.HasSubmittableWork = hasSubmittableWorkForWorkstate(clonePath, targetRefs)
+	input.AssignedBeadTerminal = m.assignedBeadTerminal(workIssue)
 	workTerminal := input.AssignedBeadTerminal || sourceTerminal || hookTerminal
 	if CanIgnoreStaleCleanupStatus(input.CleanupStatus, workTerminal, hookSafe, activeMRSafe, gitSafe) {
 		input.IgnoreCleanupStatus = true
 	}
-	input.MQNotRequired = m.mqNotRequiredSource(issue)
+	input.MQNotRequired = m.mqNotRequiredSource(workIssue)
 	if input.MQCheckRequired && input.HasSubmittableWork && !input.AssignedBeadTerminal && !input.MQNotRequired {
 		mr, err := m.beads.FindMRForBranchAny(input.Branch)
 		if err != nil {
@@ -2306,73 +2309,52 @@ func (m *Manager) mqNotRequiredSource(issueID string) bool {
 	return attachment.NoMerge || attachment.ReviewOnly || strings.EqualFold(strings.TrimSpace(attachment.MergeStrategy), "local")
 }
 
-func hasSubmittableWorkForWorkstate(worktreePath string) bool {
-	ref, err := workstateComparisonRef(worktreePath)
-	if err != nil {
-		return false
-	}
-	count, err := countPatchUniqueCommitsForWorkstate(worktreePath, ref)
-	return err == nil && count > 0
+func hasSubmittableWorkForWorkstate(worktreePath string, targetRefs []string) bool {
+	g := git.NewGit(worktreePath)
+	branch, _ := g.CurrentBranch()
+	status, err := g.BranchTargetStatus(branch, "origin", targetRefs)
+	return err == nil && status.UnpreservedPatchCount > 0
 }
 
-func workstateComparisonRef(worktreePath string) (string, error) {
-	upstreamCmd := exec.Command("git", "rev-parse", "--abbrev-ref", "@{u}")
-	upstreamCmd.Dir = worktreePath
-	if output, err := upstreamCmd.Output(); err == nil {
-		upstream := strings.TrimSpace(string(output))
-		upstreamBranch := strings.TrimPrefix(upstream, "origin/")
-		if upstream != "" && isWorkstateRecoveryBaseBranch(upstreamBranch) {
-			return upstream, nil
-		}
-	}
-	for _, ref := range []string{"origin/main", "origin/master"} {
-		verifyCmd := exec.Command("git", "rev-parse", "--verify", "--quiet", ref)
-		verifyCmd.Dir = worktreePath
-		if err := verifyCmd.Run(); err == nil {
-			return ref, nil
-		}
-	}
-	return "", fmt.Errorf("no recovery base ref")
-}
-
-func isWorkstateRecoveryBaseBranch(branch string) bool {
-	return branch == "main" || branch == "master" || strings.HasPrefix(branch, "integration/")
-}
-
-func countPatchUniqueCommitsForWorkstate(worktreePath, baseRef string) (int, error) {
-	cherryCmd := exec.Command("git", "cherry", baseRef, "HEAD")
-	cherryCmd.Dir = worktreePath
-	output, err := cherryCmd.Output()
-	if err != nil {
-		return 0, err
-	}
-	count := 0
-	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "+") {
-			count++
-		}
-	}
-	return count, nil
-}
-
-func (m *Manager) reuseTargetRefs(fields *beads.AgentFields) []string {
+func (m *Manager) reuseTargetRefs(fields *beads.AgentFields, branch string) ([]string, bool) {
 	if fields == nil {
-		return nil
+		return nil, false
 	}
 	var refs []string
+	lookupFailed := false
 	if fields.ActiveMR != "" {
 		if issue, err := m.beads.Show(fields.ActiveMR); err == nil {
 			if mrFields := beads.ParseMRFields(issue); mrFields != nil && mrFields.Target != "" {
 				refs = append(refs, mrFields.Target)
 			}
+		} else if !errors.Is(err, beads.ErrNotFound) {
+			lookupFailed = true
+		}
+	}
+	if branch != "" {
+		if issue, err := m.beads.FindMRForBranchAny(branch); err == nil {
+			if mrFields := beads.ParseMRFields(issue); mrFields != nil && mrFields.Target != "" {
+				refs = append(refs, mrFields.Target)
+			}
+		} else if !errors.Is(err, beads.ErrNotFound) {
+			lookupFailed = true
+		}
+	}
+	if fields.LastSourceIssue != "" && fields.LastSourceIssue != fields.HookBead {
+		if issue, err := m.beads.Show(fields.LastSourceIssue); err == nil {
+			refs = append(refs, attachmentTargetRefs(m.beads, issue)...)
+		} else {
+			lookupFailed = true
 		}
 	}
 	if fields.HookBead != "" {
 		if issue, err := m.beads.Show(fields.HookBead); err == nil {
 			refs = append(refs, attachmentTargetRefs(m.beads, issue)...)
+		} else {
+			lookupFailed = true
 		}
 	}
-	return uniqueRefs(refs)
+	return uniqueRefs(refs), lookupFailed
 }
 
 func attachmentTargetRefs(bd *beads.Beads, issue *beads.Issue) []string {

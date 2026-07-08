@@ -155,14 +155,14 @@ When work completes and the polecat goes idle, the sandbox is synced to main:
 # In the polecat's worktree (done automatically by gt done / gt sling)
 git checkout main
 git pull origin main
-git branch -D polecat/<name>/<old-issue>@<timestamp>
+git branch -D polecat/<name>/<old-issue>+<timestamp>
 # Worktree is now clean, on main, ready for next assignment
 ```
 
 When new work is slung:
 ```bash
 # Create fresh branch from current main
-git checkout -b polecat/<name>/<new-issue>@<timestamp>
+git checkout -b polecat/<name>/<new-issue>+<timestamp>
 # Start working
 ```
 

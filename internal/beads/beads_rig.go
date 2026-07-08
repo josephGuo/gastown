@@ -144,10 +144,12 @@ func (b *Beads) CreateRigBead(name string, fields *RigFields) (*Issue, error) {
 	id := RigBeadIDWithPrefix(prefix, name)
 	description := FormatRigDescription(name, fields)
 
-	// Ensure target database has custom types configured (including "rig").
-	// This matches what CreateAgentBead does — without it, bd rejects
-	// --type=rig on databases that haven't registered custom types yet.
-	_ = EnsureCustomTypes(b.getResolvedBeadsDir())
+	// Ensure target database keeps rig as a durable custom type, not an
+	// infra/wisp type. Failing closed avoids silently creating ephemeral rig
+	// identity beads when type config cannot be persisted.
+	if err := EnsureCustomTypes(b.getResolvedBeadsDir()); err != nil {
+		return nil, fmt.Errorf("ensuring rig bead types: %w", err)
+	}
 
 	args := []string{"create", "--json",
 		"--id=" + id,

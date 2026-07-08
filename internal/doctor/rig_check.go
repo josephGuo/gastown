@@ -1077,11 +1077,17 @@ func (c *BeadsRedirectCheck) Fix(ctx *CheckContext) error {
 			// Continue - minimal config created
 		} else {
 			_ = output // bd init succeeded
-			// Configure custom types for Gas Town (beads v0.46.0+)
-			configCmd := exec.Command("bd", "config", "set", "types.custom", constants.BeadsCustomTypes)
-			configCmd.Dir = rigPath
-			configCmd.Env = bdEnv
-			_, _ = configCmd.CombinedOutput() // Ignore errors - older beads don't need this
+			// Configure Gas Town bead types (beads v0.46.0+). Rig remains durable,
+			// not infra/wisp-backed.
+			for _, cfg := range []struct{ key, value string }{
+				{"types.custom", constants.BeadsCustomTypes},
+				{"types.infra", constants.BeadsInfraTypes},
+			} {
+				configCmd := exec.Command("bd", "config", "set", cfg.key, cfg.value)
+				configCmd.Dir = rigPath
+				configCmd.Env = bdEnv
+				_, _ = configCmd.CombinedOutput() // Ignore errors - older beads don't need this
+			}
 		}
 		if err := doltserver.EnsureMetadataForBeadsDir(ctx.TownRoot, rigBeadsDir, ctx.RigName, ctx.RigName); err != nil {
 			return fmt.Errorf("ensuring metadata.json: %w", err)

@@ -807,16 +807,21 @@ func withBeadsDirEnv(beadsDir string) []string {
 	return beads.BuildMutationPinnedBDEnv(base, beadsDir)
 }
 
-// ensureCustomTypes registers Gas Town custom issue types with beads.
+// ensureCustomTypes registers Gas Town issue type configuration with beads.
 // Beads core only supports built-in types (bug, feature, task, etc.).
-// Gas Town needs custom types: agent, role, rig, convoy, slot.
+// Gas Town needs custom types and keeps rig out of infra/wisp storage.
 // This is idempotent - safe to call multiple times.
 func ensureCustomTypes(beadsPath string) error {
-	cmd := exec.Command("bd", "config", "set", "types.custom", constants.BeadsCustomTypes)
-	cmd.Dir = beadsPath
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("bd config set types.custom: %s", strings.TrimSpace(string(output)))
+	for _, cfg := range []struct{ key, value string }{
+		{"types.custom", constants.BeadsCustomTypes},
+		{"types.infra", constants.BeadsInfraTypes},
+	} {
+		cmd := exec.Command("bd", "config", "set", cfg.key, cfg.value)
+		cmd.Dir = beadsPath
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("bd config set %s: %s", cfg.key, strings.TrimSpace(string(output)))
+		}
 	}
 	return nil
 }
@@ -903,11 +908,16 @@ func ensureBeadsCustomTypes(workDir string, types []string) error {
 		return nil
 	}
 
-	cmd := exec.Command("bd", "config", "set", "types.custom", strings.Join(types, ","))
-	cmd.Dir = workDir
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("bd config set types.custom failed: %s", strings.TrimSpace(string(output)))
+	for _, cfg := range []struct{ key, value string }{
+		{"types.custom", strings.Join(types, ",")},
+		{"types.infra", constants.BeadsInfraTypes},
+	} {
+		cmd := exec.Command("bd", "config", "set", cfg.key, cfg.value)
+		cmd.Dir = workDir
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("bd config set %s failed: %s", cfg.key, strings.TrimSpace(string(output)))
+		}
 	}
 	return nil
 }

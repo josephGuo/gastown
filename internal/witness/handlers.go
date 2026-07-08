@@ -1030,9 +1030,15 @@ func slotOpenDecision(workDir, townRoot, rigName, polecatName, exitType string) 
 	}
 	clonePath := filepath.Join(townRoot, rigName, "polecats", polecatName, rigName)
 	g := git.NewGit(clonePath)
-	targetRefs := witnessRecoveryTargetRefs(beads.New(beads.ResolveBeadsDir(workDir)), fields)
+	bd := beads.New(beads.ResolveBeadsDir(workDir))
+	var targetRefs []string
 	if branch, err := g.CurrentBranch(); err == nil {
 		input.Branch = branch
+		var targetRefLookupFailed bool
+		targetRefs, targetRefLookupFailed = witnessRecoveryTargetRefs(bd, fields, branch)
+		if targetRefLookupFailed {
+			input.MQLookupFailed = true
+		}
 		if status, err := g.CheckUncommittedWork(); err == nil {
 			input.GitDirty = !status.CleanExcludingRuntime()
 			input.StashCount = status.StashCount
@@ -1056,7 +1062,7 @@ func slotOpenDecision(workDir, townRoot, rigName, polecatName, exitType string) 
 		if sourceHint == "" {
 			sourceHint = fields.HookBead
 		}
-		assessment := polecat.AssessActiveMR(beads.New(beads.ResolveBeadsDir(workDir)), polecat.ActiveMRInput{ActiveMR: fields.ActiveMR, SourceIssueHint: sourceHint, RequireGitSafe: true, GitSafe: gitSafe})
+		assessment := polecat.AssessActiveMR(bd, polecat.ActiveMRInput{ActiveMR: fields.ActiveMR, SourceIssueHint: sourceHint, RequireGitSafe: true, GitSafe: gitSafe})
 		if assessment.Pending {
 			input.ActiveMRBlocker = assessment.Reason
 		}
@@ -1066,7 +1072,7 @@ func slotOpenDecision(workDir, townRoot, rigName, polecatName, exitType string) 
 		}
 	}
 	input.MQCheckRequired = input.Branch != ""
-	input.HasSubmittableWork = witnessHasSubmittableWork(clonePath)
+	input.HasSubmittableWork = witnessHasSubmittableWork(clonePath, targetRefs)
 	input.AssignedBeadTerminal = witnessIssueTerminal(rigBeads, issueID)
 	if polecat.CanIgnoreStaleCleanupStatus(input.CleanupStatus, input.AssignedBeadTerminal || sourceTerminal || hookTerminal, hookSafe, activeMRSafe, gitSafe) {
 		input.IgnoreCleanupStatus = true
@@ -1083,24 +1089,45 @@ func slotOpenDecision(workDir, townRoot, rigName, polecatName, exitType string) 
 	return polecat.DecideSlotReuse(input)
 }
 
-func witnessRecoveryTargetRefs(bd *beads.Beads, fields *beads.AgentFields) []string {
+func witnessRecoveryTargetRefs(bd *beads.Beads, fields *beads.AgentFields, branch string) ([]string, bool) {
 	if fields == nil || bd == nil {
-		return nil
+		return nil, false
 	}
 	var refs []string
+	lookupFailed := false
 	if fields.ActiveMR != "" {
 		if issue, err := bd.Show(fields.ActiveMR); err == nil {
 			if mrFields := beads.ParseMRFields(issue); mrFields != nil && mrFields.Target != "" {
 				refs = append(refs, mrFields.Target)
 			}
+		} else if !errors.Is(err, beads.ErrNotFound) {
+			lookupFailed = true
+		}
+	}
+	if branch != "" {
+		if issue, err := bd.FindMRForBranchAny(branch); err == nil {
+			if mrFields := beads.ParseMRFields(issue); mrFields != nil && mrFields.Target != "" {
+				refs = append(refs, mrFields.Target)
+			}
+		} else if !errors.Is(err, beads.ErrNotFound) {
+			lookupFailed = true
+		}
+	}
+	if fields.LastSourceIssue != "" && fields.LastSourceIssue != fields.HookBead {
+		if issue, err := bd.Show(fields.LastSourceIssue); err == nil {
+			refs = append(refs, witnessAttachmentTargetRefs(bd, issue)...)
+		} else {
+			lookupFailed = true
 		}
 	}
 	if fields.HookBead != "" {
 		if issue, err := bd.Show(fields.HookBead); err == nil {
 			refs = append(refs, witnessAttachmentTargetRefs(bd, issue)...)
+		} else {
+			lookupFailed = true
 		}
 	}
-	return witnessUniqueRefs(refs)
+	return witnessUniqueRefs(refs), lookupFailed
 }
 
 func witnessAttachmentTargetRefs(bd *beads.Beads, issue *beads.Issue) []string {
@@ -1192,53 +1219,11 @@ func witnessMQNotRequiredSource(bd *beads.Beads, issueID string) bool {
 	return attachment.NoMerge || attachment.ReviewOnly || strings.EqualFold(strings.TrimSpace(attachment.MergeStrategy), "local")
 }
 
-func witnessHasSubmittableWork(worktreePath string) bool {
-	ref, err := witnessWorkstateComparisonRef(worktreePath)
-	if err != nil {
-		return false
-	}
-	count, err := witnessCountPatchUniqueCommits(worktreePath, ref)
-	return err == nil && count > 0
-}
-
-func witnessWorkstateComparisonRef(worktreePath string) (string, error) {
-	upstreamCmd := exec.Command("git", "rev-parse", "--abbrev-ref", "@{u}")
-	upstreamCmd.Dir = worktreePath
-	if output, err := upstreamCmd.Output(); err == nil {
-		upstream := strings.TrimSpace(string(output))
-		upstreamBranch := strings.TrimPrefix(upstream, "origin/")
-		if upstream != "" && witnessIsWorkstateRecoveryBaseBranch(upstreamBranch) {
-			return upstream, nil
-		}
-	}
-	for _, ref := range []string{"origin/main", "origin/master"} {
-		verifyCmd := exec.Command("git", "rev-parse", "--verify", "--quiet", ref)
-		verifyCmd.Dir = worktreePath
-		if err := verifyCmd.Run(); err == nil {
-			return ref, nil
-		}
-	}
-	return "", fmt.Errorf("no recovery base ref")
-}
-
-func witnessIsWorkstateRecoveryBaseBranch(branch string) bool {
-	return branch == "main" || branch == "master" || strings.HasPrefix(branch, "integration/")
-}
-
-func witnessCountPatchUniqueCommits(worktreePath, baseRef string) (int, error) {
-	cherryCmd := exec.Command("git", "cherry", baseRef, "HEAD")
-	cherryCmd.Dir = worktreePath
-	output, err := cherryCmd.Output()
-	if err != nil {
-		return 0, err
-	}
-	count := 0
-	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "+") {
-			count++
-		}
-	}
-	return count, nil
+func witnessHasSubmittableWork(worktreePath string, targetRefs []string) bool {
+	g := git.NewGit(worktreePath)
+	branch, _ := g.CurrentBranch()
+	status, err := g.BranchTargetStatus(branch, "origin", targetRefs)
+	return err == nil && status.UnpreservedPatchCount > 0
 }
 
 // RecoveryPayload contains data for RECOVERY_NEEDED escalation.
@@ -1483,11 +1468,9 @@ func _verifyCommitOnMain(workDir, rigName, polecatName string) (bool, error) {
 // Flow (aa-apw):
 //  1. Fast path: ancestor check via verifyCommitOnMain (catches fast-forward /
 //     regular merges).
-//  2. Patch-id path: `git cherry <remote>/<default> <HEAD>` lines starting with
-//     "-" mean the patch-id is already applied upstream. If every commit the
-//     polecat branch adds on top of origin/main is marked "-", the work is
-//     equivalent to something already merged (e.g., squash-merged). Empty
-//     output is also equivalent — branch has no commits beyond base.
+//  2. Target-preservation path: reuse git.BranchTargetStatus so squash-merged
+//     checkpoint work, patch-equivalent work, and advanced default branches are
+//     classified the same way as check-recovery and reuse.
 //
 // Returns:
 //   - true, nil: work on this branch is already on default branch (skip restart,
@@ -1526,38 +1509,22 @@ func _verifyBranchAlreadyMerged(workDir, rigName, polecatName string) (bool, err
 		remotes = []string{"origin"}
 	}
 
-	// git cherry marks each commit that HEAD introduces on top of <upstream>:
-	//   "+ <sha>" — patch-id not present upstream
-	//   "- <sha>" — patch-id already upstream (e.g., squash-merged)
-	// If no "+" lines remain, the work is fully landed.
+	branch, err := g.CurrentBranch()
+	if err != nil {
+		return false, err
+	}
 	for _, remote := range remotes {
 		upstream := remote + "/" + defaultBranch
-		out, err := g.Cherry(upstream, "HEAD")
+		status, err := g.BranchTargetStatus(branch, remote, []string{upstream})
 		if err != nil {
 			continue // try next remote
 		}
-		if !cherryHasUnmergedCommits(out) {
+		if status.Preserved {
 			return true, nil
 		}
 	}
 
 	return false, nil
-}
-
-// cherryHasUnmergedCommits returns true if `git cherry` output contains at least
-// one commit marked with "+" (not yet upstream). Empty output means no commits
-// beyond base — already merged.
-func cherryHasUnmergedCommits(out string) bool {
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		if strings.HasPrefix(line, "+") {
-			return true
-		}
-	}
-	return false
 }
 
 // ZombieClassification categorizes why a polecat was classified as a zombie.

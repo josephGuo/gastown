@@ -236,6 +236,84 @@ func TestUpdateAgentState_UsesUpdateDescriptionPath(t *testing.T) {
 	}
 }
 
+func TestClearAgentActiveMRIfMatchesClearsExactMatch(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mocks for bd")
+	}
+	tmpDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+
+	logPath := installMockBDShowRecorder(t, `[{"id":"gt-gastown-polecat-nux","title":"Polecat nux","issue_type":"agent","labels":["gt:agent"],"description":"role_type: polecat\nrig: gastown\nagent_state: working\nactive_mr: gt-wisp-old\ncleanup_status: clean"}]`)
+	bd := NewIsolated(tmpDir)
+
+	cleared, err := bd.ClearAgentActiveMRIfMatches("gt-gastown-polecat-nux", "gt-wisp-old")
+	if err != nil {
+		t.Fatalf("ClearAgentActiveMRIfMatches: %v", err)
+	}
+	if !cleared {
+		t.Fatal("ClearAgentActiveMRIfMatches cleared = false, want true")
+	}
+
+	logOutput := readMockBDLog(t, logPath)
+	if !strings.Contains(logOutput, "show gt-gastown-polecat-nux --json") || !strings.Contains(logOutput, "update gt-gastown-polecat-nux") {
+		t.Fatalf("mock bd log %q missing show/update", logOutput)
+	}
+}
+
+func TestClearAgentActiveMRIfMatchesNoopsWhenDifferent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mocks for bd")
+	}
+	tmpDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+
+	logPath := installMockBDShowRecorder(t, `[{"id":"gt-gastown-polecat-nux","title":"Polecat nux","issue_type":"agent","labels":["gt:agent"],"description":"role_type: polecat\nrig: gastown\nagent_state: working\nactive_mr: gt-wisp-new"}]`)
+	bd := NewIsolated(tmpDir)
+
+	cleared, err := bd.ClearAgentActiveMRIfMatches("gt-gastown-polecat-nux", "gt-wisp-old")
+	if err != nil {
+		t.Fatalf("ClearAgentActiveMRIfMatches: %v", err)
+	}
+	if cleared {
+		t.Fatal("ClearAgentActiveMRIfMatches cleared = true, want false")
+	}
+
+	logOutput := readMockBDLog(t, logPath)
+	if strings.Contains(logOutput, "update gt-gastown-polecat-nux") {
+		t.Fatalf("mock bd log %q unexpectedly updated mismatched active_mr", logOutput)
+	}
+}
+
+func TestClearAgentActiveMRIfMatchesRejectsNonAgent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mocks for bd")
+	}
+	tmpDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+
+	logPath := installMockBDShowRecorder(t, `[{"id":"gt-task","title":"Task","issue_type":"task","labels":["gt:task"],"description":"active_mr: gt-wisp-old"}]`)
+	bd := NewIsolated(tmpDir)
+
+	cleared, err := bd.ClearAgentActiveMRIfMatches("gt-task", "gt-wisp-old")
+	if err == nil {
+		t.Fatal("ClearAgentActiveMRIfMatches expected non-agent error")
+	}
+	if cleared {
+		t.Fatal("ClearAgentActiveMRIfMatches cleared = true, want false")
+	}
+
+	logOutput := readMockBDLog(t, logPath)
+	if strings.Contains(logOutput, "update gt-task") {
+		t.Fatalf("mock bd log %q unexpectedly updated non-agent", logOutput)
+	}
+}
+
 func TestUpdateAgentState_UsesExplicitBeadsDir(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses Unix shell script mocks for bd")
@@ -504,7 +582,7 @@ func TestCreateOrReopenAgentBeadExistingUsesTownBeadsDir(t *testing.T) {
 	if err := WriteRoutes(townBeadsDir, []Route{{Prefix: "hq-", Path: "."}, {Prefix: "gt-", Path: "gastown/mayor/rig"}}); err != nil {
 		t.Fatalf("write routes: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(townBeadsDir, ".gt-types-configured"), []byte("v1\n"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(townBeadsDir, ".gt-types-configured"), []byte(TypeConfigSentinelValue()+"\n"), 0644); err != nil {
 		t.Fatalf("write types sentinel: %v", err)
 	}
 

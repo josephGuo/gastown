@@ -183,11 +183,21 @@ const (
 	//   gate          - Async coordination (bd gate wait, park/resume)
 	//   merge-request - Refinery MR processing (gt done, refinery)
 	BeadsCustomTypes = "agent,role,rig,convoy,slot,queue,event,message,molecule,gate,merge-request"
+
+	// BeadsInfraTypes is the comma-separated list of issue types that beads should
+	// store as ephemeral wisps. Rig identity beads intentionally stay custom but
+	// not infra so their durable state survives wisp cleanup.
+	BeadsInfraTypes = "agent,role,message"
 )
 
 // BeadsCustomTypesList returns the custom types as a slice.
 func BeadsCustomTypesList() []string {
 	return []string{"agent", "role", "rig", "convoy", "slot", "queue", "event", "message", "molecule", "gate", "merge-request"}
+}
+
+// BeadsInfraTypesList returns the infra types as a slice.
+func BeadsInfraTypesList() []string {
+	return []string{"agent", "role", "message"}
 }
 
 // Beads custom status configuration constants.
@@ -441,4 +451,3 @@ var DefaultNearLimitPatterns = []string{
 	`almost\s+(at|hit|reached)\s+(your\s+)?(rate\s+)?limit`,       // "almost reached your rate limit"
 	`\d+\s*(messages?|requests?)\s*(left|remaining)`,               // "10 messages remaining"
 }
-

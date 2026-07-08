@@ -9,6 +9,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -42,15 +43,19 @@ type tmuxOps interface {
 
 // Manager handles deacon lifecycle operations.
 type Manager struct {
-	townRoot string
-	tmux     tmuxOps
+	townRoot    string
+	tmux        tmuxOps
+	startPoller func(townRoot, session string) (int, error)
+	stopPoller  func(townRoot, session string) error
 }
 
 // NewManager creates a new deacon manager for a town.
 func NewManager(townRoot string) *Manager {
 	return &Manager{
-		townRoot: townRoot,
-		tmux:     tmux.NewTmux(),
+		townRoot:    townRoot,
+		tmux:        tmux.NewTmux(),
+		startPoller: nudge.StartPoller,
+		stopPoller:  nudge.StopPoller,
 	}
 }
 
@@ -70,6 +75,24 @@ func (m *Manager) deaconDir() string {
 	return filepath.Join(m.townRoot, "deacon")
 }
 
+func (m *Manager) startNudgePoller(sessionID string) {
+	if m.startPoller == nil {
+		return
+	}
+	if _, pollerErr := m.startPoller(m.townRoot, sessionID); pollerErr != nil {
+		fmt.Printf("warning: could not start nudge poller for %s: %v\n", sessionID, pollerErr)
+	}
+}
+
+func (m *Manager) stopNudgePoller(sessionID string) {
+	if m.stopPoller == nil {
+		return
+	}
+	if pollerErr := m.stopPoller(m.townRoot, sessionID); pollerErr != nil {
+		fmt.Printf("warning: could not stop nudge poller for %s: %v\n", sessionID, pollerErr)
+	}
+}
+
 // Start starts the deacon session.
 // agentOverride allows specifying an alternate agent alias (e.g., for testing).
 // Restarts are handled by daemon via ensureDeaconRunning on each heartbeat.
@@ -82,6 +105,7 @@ func (m *Manager) Start(agentOverride string) error {
 	if running {
 		// Session exists - check if agent is actually running (healthy vs zombie)
 		if t.IsAgentAlive(sessionID) {
+			m.startNudgePoller(sessionID)
 			return ErrAlreadyRunning
 		}
 
@@ -89,6 +113,7 @@ func (m *Manager) Start(agentOverride string) error {
 		// The auto-respawn hook (SetAutoRespawnHook) handles clean exits at the
 		// tmux level — Go doesn't need to distinguish dead pane vs zombie shell.
 		// Use KillSessionWithProcesses to ensure all descendant processes are killed.
+		m.stopNudgePoller(sessionID)
 		if err := t.KillSessionWithProcesses(sessionID); err != nil {
 			return fmt.Errorf("killing zombie session: %w", err)
 		}
@@ -178,6 +203,7 @@ func (m *Manager) Start(agentOverride string) error {
 
 	// Accept startup dialogs (workspace trust + bypass permissions) if they appear.
 	_ = t.AcceptStartupDialogs(sessionID)
+	m.startNudgePoller(sessionID)
 
 	time.Sleep(constants.ShutdownNotifyDelay)
 
@@ -197,6 +223,8 @@ func (m *Manager) Stop() error {
 	if !running {
 		return ErrNotRunning
 	}
+
+	m.stopNudgePoller(sessionID)
 
 	// Try graceful shutdown first (best-effort interrupt)
 	_ = t.SendKeysRaw(sessionID, "C-c")

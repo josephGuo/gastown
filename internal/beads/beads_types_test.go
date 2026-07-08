@@ -53,11 +53,14 @@ switch ($cmd) {
     if ($args.Length -ge 3 -and $args[1] -eq 'get' -and $args[2] -eq 'status.custom') {
       Write-Output ''
     }
-    if ($args.Length -ge 3 -and $args[1] -eq 'get' -and $args[2] -eq 'types.custom') {
-      Write-Output 'agent,role,rig,convoy,slot,queue,event,message,molecule,gate,merge-request'
-    }
-    exit 0
-  }
+			if ($args.Length -ge 3 -and $args[1] -eq 'get' -and $args[2] -eq 'types.custom') {
+			  Write-Output 'agent,role,rig,convoy,slot,queue,event,message,molecule,gate,merge-request'
+			}
+			if ($args.Length -ge 3 -and $args[1] -eq 'get' -and $args[2] -eq 'types.infra') {
+			  Write-Output 'agent,role,message'
+			}
+			exit 0
+		  }
   'migrate' { exit 0 }
   default { exit 0 }
 }
@@ -95,12 +98,14 @@ case "$cmd" in
     printf 'prefix: %s\nissue-prefix: %s-\n' "$prefix" "$prefix" > "$target/config.yaml"
     exit 0
     ;;
-  config)
-    # Return types list for "config get types.custom" verification
-    if echo "$*" | grep -q "get types.custom"; then
-      echo "agent,role,rig,convoy,slot,queue,event,message,molecule,gate,merge-request"
-    fi
-    exit 0
+	  config)
+	    # Return types list for "config get types.custom" verification
+	    if echo "$*" | grep -q "get types.custom"; then
+	      echo "agent,role,rig,convoy,slot,queue,event,message,molecule,gate,merge-request"
+	    elif echo "$*" | grep -q "get types.infra"; then
+	      echo "agent,role,message"
+	    fi
+	    exit 0
     ;;
   migrate)
     exit 0
@@ -312,10 +317,9 @@ func TestEnsureCustomTypes(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		// Create sentinel file with current types list
-		currentTypes := strings.Join(constants.BeadsCustomTypesList(), ",")
+		// Create sentinel file with current type config.
 		sentinelPath := filepath.Join(beadsDir, typesSentinel)
-		if err := os.WriteFile(sentinelPath, []byte(currentTypes+"\n"), 0644); err != nil {
+		if err := os.WriteFile(sentinelPath, []byte(TypeConfigSentinelValue()+"\n"), 0644); err != nil {
 			t.Fatal(err)
 		}
 
@@ -350,12 +354,46 @@ func TestEnsureCustomTypes(t *testing.T) {
 			t.Fatalf("EnsureCustomTypes: %v", err)
 		}
 
-		if got := strings.TrimSpace(string(mustReadFile(t, sentinelPath))); got != strings.Join(constants.BeadsCustomTypesList(), ",") {
-			t.Fatalf("types sentinel = %q, want current configured types", got)
+		if got := strings.TrimSpace(string(mustReadFile(t, sentinelPath))); got != TypeConfigSentinelValue() {
+			t.Fatalf("types sentinel = %q, want current type config", got)
 		}
 
 		logOutput := readMockBDLog(t, logPath)
-		for _, want := range []string{"init", "config set types.custom"} {
+		for _, want := range []string{"init", "config set types.custom", "config set types.infra"} {
+			if !strings.Contains(logOutput, want) {
+				t.Fatalf("mock bd log %q missing %q", logOutput, want)
+			}
+		}
+	})
+
+	t.Run("custom-types-only sentinel triggers infra re-configuration", func(t *testing.T) {
+		logPath := installMockBDRecorder(t)
+		tmpDir := t.TempDir()
+		beadsDir := filepath.Join(tmpDir, ".beads")
+		if err := os.MkdirAll(beadsDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		// This was the real pre-fix sentinel format. It must be stale so existing
+		// databases receive the durable-rig infra config.
+		sentinelPath := filepath.Join(beadsDir, typesSentinel)
+		legacyValue := strings.Join(constants.BeadsCustomTypesList(), ",")
+		if err := os.WriteFile(sentinelPath, []byte(legacyValue+"\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		ResetEnsuredDirs()
+
+		if err := EnsureCustomTypes(beadsDir); err != nil {
+			t.Fatalf("EnsureCustomTypes: %v", err)
+		}
+
+		if got := strings.TrimSpace(string(mustReadFile(t, sentinelPath))); got != TypeConfigSentinelValue() {
+			t.Fatalf("types sentinel = %q, want current type config", got)
+		}
+
+		logOutput := readMockBDLog(t, logPath)
+		for _, want := range []string{"config set types.custom", "config set types.infra"} {
 			if !strings.Contains(logOutput, want) {
 				t.Fatalf("mock bd log %q missing %q", logOutput, want)
 			}
@@ -369,10 +407,9 @@ func TestEnsureCustomTypes(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		// Create sentinel with current types to avoid bd call
-		currentTypes := strings.Join(constants.BeadsCustomTypesList(), ",")
+		// Create sentinel with current type config to avoid bd call.
 		sentinelPath := filepath.Join(beadsDir, typesSentinel)
-		if err := os.WriteFile(sentinelPath, []byte(currentTypes+"\n"), 0644); err != nil {
+		if err := os.WriteFile(sentinelPath, []byte(TypeConfigSentinelValue()+"\n"), 0644); err != nil {
 			t.Fatal(err)
 		}
 
@@ -390,6 +427,66 @@ func TestEnsureCustomTypes(t *testing.T) {
 			t.Errorf("expected cache hit, got: %v", err)
 		}
 	})
+}
+
+func TestEnsureCustomTypesConfigYAML(t *testing.T) {
+	ResetEnsuredDirs()
+
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := EnsureCustomTypesConfigYAML(beadsDir); err != nil {
+		t.Fatalf("EnsureCustomTypesConfigYAML: %v", err)
+	}
+
+	config := string(mustReadFile(t, filepath.Join(beadsDir, "config.yaml")))
+	for _, want := range []string{
+		"types.custom: " + strings.Join(constants.BeadsCustomTypesList(), ","),
+		"types.infra: " + strings.Join(constants.BeadsInfraTypesList(), ","),
+	} {
+		if !strings.Contains(config, want) {
+			t.Fatalf("config.yaml missing %q in:\n%s", want, config)
+		}
+	}
+	if strings.Contains(config, "types.infra: agent,role,rig,message") {
+		t.Fatalf("config.yaml kept rig in infra types:\n%s", config)
+	}
+
+	if _, err := os.Stat(filepath.Join(beadsDir, typesSentinel)); !os.IsNotExist(err) {
+		t.Fatalf("YAML-only type config must not write DB-verified sentinel, stat err: %v", err)
+	}
+}
+
+func TestEnsureCustomTypesConfigYAMLIgnoresDBCache(t *testing.T) {
+	ResetEnsuredDirs()
+
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	ensuredMu.Lock()
+	ensuredDirs[beadsDir] = true
+	ensuredMu.Unlock()
+	t.Cleanup(ResetEnsuredDirs)
+
+	if err := EnsureCustomTypesConfigYAML(beadsDir); err != nil {
+		t.Fatalf("EnsureCustomTypesConfigYAML: %v", err)
+	}
+
+	config := string(mustReadFile(t, filepath.Join(beadsDir, "config.yaml")))
+	for _, want := range []string{
+		"types.custom: " + strings.Join(constants.BeadsCustomTypesList(), ","),
+		"types.infra: " + strings.Join(constants.BeadsInfraTypesList(), ","),
+	} {
+		if !strings.Contains(config, want) {
+			t.Fatalf("config.yaml missing %q in:\n%s", want, config)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(beadsDir, typesSentinel)); !os.IsNotExist(err) {
+		t.Fatalf("YAML-only type config must not write DB-verified sentinel, stat err: %v", err)
+	}
 }
 
 func TestEnsureCustomTypes_VerifyPersistence(t *testing.T) {

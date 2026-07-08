@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 func TestNewMailbox(t *testing.T) {
@@ -445,7 +445,7 @@ func TestMailboxListFromDirConvergesWispQueryAndFiltersStatuses(t *testing.T) {
 	}
 
 	beadsDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(beadsDir, ".gt-types-configured"), []byte(strings.Join(constants.BeadsCustomTypesList(), ",")+"\n"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(beadsDir, ".gt-types-configured"), []byte(beads.TypeConfigSentinelValue()+"\n"), 0644); err != nil {
 		t.Fatalf("write types sentinel: %v", err)
 	}
 

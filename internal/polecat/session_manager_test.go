@@ -362,7 +362,7 @@ func TestEnsureCanonicalSessionBranch_UsesOriginDefaultBranch(t *testing.T) {
 
 	sm := NewSessionManager(tmux.NewTmux(), &rig.Rig{Name: "gastown", Path: workDir})
 	branch := sm.ensureCanonicalSessionBranch(repoGit, "toast", SessionStartOptions{Issue: "gt-9qb"})
-	if !strings.Contains(branch, "/gt-9qb@") {
+	if !strings.Contains(branch, "/gt-9qb+") {
 		t.Fatalf("fresh session branch = %q, want issue-scoped branch", branch)
 	}
 
@@ -642,9 +642,9 @@ func TestPromptlessFallbackIncludesPrimeAndWorkInstructions(t *testing.T) {
 // not auto-submitted; the condition triggers verifyStartupNudgeDelivery as a safety net.
 func TestModeABeaconVerificationCondition(t *testing.T) {
 	tests := []struct {
-		name            string
-		rc              *config.RuntimeConfig
-		wantModeA       bool // !SendBeaconNudge && !SendStartupNudge
+		name      string
+		rc        *config.RuntimeConfig
+		wantModeA bool // !SendBeaconNudge && !SendStartupNudge
 	}{
 		{
 			name: "Claude hook+prompt agent triggers Mode A verification",
@@ -870,6 +870,9 @@ func TestParseFreshBranchName_RoundTrip(t *testing.T) {
 		{name: "with issue", polecat: "alpha", issue: "gt-abc"},
 		{name: "no issue", polecat: "beta", issue: ""},
 		{name: "numeric issue", polecat: "nux", issue: "gt-123"},
+		{name: "dotted subtask", polecat: "furiosa", issue: "gt-jns7.1"},
+		{name: "dashed issue", polecat: "alpha", issue: "gt-pin-bd-metadata"},
+		{name: "nested dotted subtask", polecat: "alpha", issue: "gt-4kp9.5.5.1"},
 	}
 
 	for _, c := range cases {
@@ -889,18 +892,46 @@ func TestParseFreshBranchName_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestParseFreshBranchName_IssueTimestampSeparators(t *testing.T) {
+	cases := []struct {
+		name   string
+		branch string
+		issue  string
+	}{
+		{name: "current plus separator", branch: "polecat/alpha/gt-abc+mk123456", issue: "gt-abc"},
+		{name: "legacy at separator", branch: "polecat/alpha/gt-abc@mk123456", issue: "gt-abc"},
+		{name: "dotted subtask", branch: "polecat/alpha/gt-abc.1+mk123456", issue: "gt-abc.1"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			meta := parseFreshBranchName(c.branch)
+			if !meta.ok {
+				t.Fatalf("parseFreshBranchName(%q) not ok", c.branch)
+			}
+			if meta.polecat != "alpha" || meta.issue != c.issue {
+				t.Fatalf("parseFreshBranchName(%q) = %+v, want polecat alpha issue %s", c.branch, meta, c.issue)
+			}
+		})
+	}
+}
+
 func TestParseFreshBranchName_Rejects(t *testing.T) {
 	rejects := []string{
 		"main",
 		"master",
 		"develop",
 		"feature/x",
-		"polecat/",          // empty tail
-		"polecat/alpha",     // no ts or issue
-		"polecat/alpha-",    // trailing dash, no ts
-		"polecat//gt-abc@1", // empty polecat name
-		"polecat/alpha/@1",  // empty issue
-		"polecat/alpha/gt-abc@", // empty ts
+		"polecat/",                         // empty tail
+		"polecat/alpha",                    // no ts or issue
+		"polecat/alpha-",                   // trailing dash, no ts
+		"polecat//gt-abc@1",                // empty polecat name
+		"polecat/alpha/@1",                 // empty issue
+		"polecat/alpha/+1",                 // empty issue
+		"polecat/alpha/gt-abc@",            // empty ts
+		"polecat/alpha/gt-abc+",            // empty ts
+		"polecat/alpha/gt-pin-bd-metadata", // raw issue branch, not generated
+		"polecat/alpha/gt-jns7.1-mk123456", // dash suffix is ambiguous and not generated
 		"",
 	}
 	for _, b := range rejects {
@@ -936,6 +967,13 @@ func TestShouldCreateFreshSessionBranch_Structural(t *testing.T) {
 		},
 		{
 			name:            "same-issue respawn preserves branch",
+			currentBranch:   "polecat/alpha/gt-abc+xyz",
+			issue:           "gt-abc",
+			canonicalBranch: "main",
+			want:            false,
+		},
+		{
+			name:            "legacy same-issue respawn preserves branch",
 			currentBranch:   "polecat/alpha/gt-abc@xyz",
 			issue:           "gt-abc",
 			canonicalBranch: "main",
@@ -943,7 +981,7 @@ func TestShouldCreateFreshSessionBranch_Structural(t *testing.T) {
 		},
 		{
 			name:            "other-issue polecat branch triggers fresh",
-			currentBranch:   "polecat/alpha/gt-999@xyz",
+			currentBranch:   "polecat/alpha/gt-999+xyz",
 			issue:           "gt-abc",
 			canonicalBranch: "main",
 			want:            true,

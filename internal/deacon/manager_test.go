@@ -119,6 +119,34 @@ func TestStart_AlreadyRunning(t *testing.T) {
 	}
 }
 
+func TestStart_AlreadyRunningRepairsNudgePoller(t *testing.T) {
+	mock := &mockTmux{
+		hasSessionResult: true,
+		agentAlive:       true,
+	}
+	m := newTestManager(t.TempDir(), mock)
+
+	var calls int
+	m.startPoller = func(townRoot, session string) (int, error) {
+		calls++
+		if townRoot != m.townRoot {
+			t.Fatalf("townRoot = %q, want %q", townRoot, m.townRoot)
+		}
+		if session != m.SessionName() {
+			t.Fatalf("session = %q, want %q", session, m.SessionName())
+		}
+		return 123, nil
+	}
+
+	err := m.Start("")
+	if !errors.Is(err, ErrAlreadyRunning) {
+		t.Errorf("Start() error = %v, want ErrAlreadyRunning", err)
+	}
+	if calls != 1 {
+		t.Errorf("startPoller calls = %d, want 1", calls)
+	}
+}
+
 func TestStart_ZombieDetected_KillFails(t *testing.T) {
 	killErr := errors.New("kill failed: session locked")
 	mock := &mockTmux{
@@ -176,6 +204,33 @@ func TestStart_NoExistingSession(t *testing.T) {
 	// Should NOT have tried to kill anything
 	if len(mock.killCalls) != 0 {
 		t.Errorf("expected 0 kill calls, got %d", len(mock.killCalls))
+	}
+}
+
+func TestStart_SuccessStartsNudgePoller(t *testing.T) {
+	mock := &mockTmux{
+		hasSessionResult: false,
+	}
+	m := newTestManager(t.TempDir(), mock)
+
+	var calls int
+	m.startPoller = func(townRoot, session string) (int, error) {
+		calls++
+		if townRoot != m.townRoot {
+			t.Fatalf("townRoot = %q, want %q", townRoot, m.townRoot)
+		}
+		if session != m.SessionName() {
+			t.Fatalf("session = %q, want %q", session, m.SessionName())
+		}
+		return 123, nil
+	}
+
+	err := m.Start("claude")
+	if err != nil {
+		t.Fatalf("Start() error = %v, want nil", err)
+	}
+	if calls != 1 {
+		t.Errorf("startPoller calls = %d, want 1", calls)
 	}
 }
 
@@ -293,6 +348,32 @@ func TestStop_Success(t *testing.T) {
 	}
 	if len(mock.killCalls) != 1 {
 		t.Errorf("expected 1 kill call, got %d", len(mock.killCalls))
+	}
+}
+
+func TestStop_StopsNudgePoller(t *testing.T) {
+	mock := &mockTmux{
+		hasSessionResult: true,
+	}
+	m := newTestManager(t.TempDir(), mock)
+
+	var calls int
+	m.stopPoller = func(townRoot, session string) error {
+		calls++
+		if townRoot != m.townRoot {
+			t.Fatalf("townRoot = %q, want %q", townRoot, m.townRoot)
+		}
+		if session != m.SessionName() {
+			t.Fatalf("session = %q, want %q", session, m.SessionName())
+		}
+		return nil
+	}
+
+	if err := m.Stop(); err != nil {
+		t.Fatalf("Stop() error = %v, want nil", err)
+	}
+	if calls != 1 {
+		t.Errorf("stopPoller calls = %d, want 1", calls)
 	}
 }
 

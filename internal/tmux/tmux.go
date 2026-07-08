@@ -221,15 +221,25 @@ func NewTmuxWithSocket(socket string) *Tmux {
 // All commands include -u flag for UTF-8 support regardless of locale settings.
 // See: https://github.com/steveyegge/gastown/issues/1219
 func (t *Tmux) run(args ...string) (string, error) {
-	// Prepend global flags: -u (UTF-8 mode, PATCH-004) and optionally -L (socket).
-	// The -L flag must come before the subcommand, so it goes in the prefix.
+	return t.runContext(context.Background(), args...)
+}
+
+func (t *Tmux) commandContext(ctx context.Context, args ...string) *exec.Cmd {
 	allArgs := []string{"-u"}
 	if t.socketName != "" {
 		allArgs = append(allArgs, "-L", t.socketName)
 	}
 	allArgs = append(allArgs, args...)
-	cmd := exec.Command("tmux", allArgs...)
+	cmd := exec.CommandContext(ctx, "tmux", allArgs...)
 	hideConsoleWindow(cmd)
+	return cmd
+}
+
+func (t *Tmux) runContext(ctx context.Context, args ...string) (string, error) {
+	cmd := t.commandContext(ctx, args...)
+	if _, ok := ctx.Deadline(); ok {
+		cmd.WaitDelay = 100 * time.Millisecond
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -267,14 +277,22 @@ func (t *Tmux) wrapError(err error, stderr string, args []string) error {
 	return fmt.Errorf("tmux %s: %w", args[0], err)
 }
 
-// NewSession creates a new detached tmux session.
-func (t *Tmux) NewSession(name, workDir string) error {
-	if err := validateSessionName(name); err != nil {
+func (t *Tmux) createNewSession(name, workDir string, env map[string]string) error {
+	if err := t.ensureNewSessionSocketSafe(); err != nil {
 		return err
 	}
+
 	args := []string{"new-session", "-d", "-s", name}
 	if workDir != "" {
 		args = append(args, "-c", workDir)
+	}
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		args = append(args, "-e", fmt.Sprintf("%s=%s", k, env[k]))
 	}
 	if _, err := t.run(args...); err != nil {
 		return err
@@ -284,6 +302,14 @@ func (t *Tmux) NewSession(name, workDir string) error {
 	// "latest" so the window auto-resizes to the attaching client's terminal size.
 	_, _ = t.run("set-option", "-wt", name, "window-size", "latest")
 	return nil
+}
+
+// NewSession creates a new detached tmux session.
+func (t *Tmux) NewSession(name, workDir string) error {
+	if err := validateSessionName(name); err != nil {
+		return err
+	}
+	return t.createNewSession(name, workDir, nil)
 }
 
 // NewSessionWithCommand creates a new detached tmux session that immediately runs a command.
@@ -311,6 +337,9 @@ func (t *Tmux) NewSessionWithCommand(name, workDir, command string) error {
 	if err := validateCommandBinary(command); err != nil {
 		return err
 	}
+	if err := t.ensureNewSessionSocketSafe(); err != nil {
+		return err
+	}
 
 	// Defense-in-depth: remove CLAUDECODE and agent-identity vars from the
 	// tmux server's global environment so new sessions don't inherit them.
@@ -330,17 +359,9 @@ func (t *Tmux) NewSessionWithCommand(name, workDir, command string) error {
 	// Two-step creation: create session with default shell first, configure
 	// remain-on-exit, then replace the shell with the actual command. This
 	// eliminates the race between command exit and health check setup.
-	args := []string{"new-session", "-d", "-s", name}
-	if workDir != "" {
-		args = append(args, "-c", workDir)
-	}
-	if _, err := t.run(args...); err != nil {
+	if err := t.createNewSession(name, workDir, nil); err != nil {
 		return err
 	}
-	// tmux 3.3+ sets window-size=manual on detached sessions (no client present),
-	// which locks the window at 80x24 even after a client attaches. Override to
-	// "latest" so the window auto-resizes to the attaching client's terminal size.
-	_, _ = t.run("set-option", "-wt", name, "window-size", "latest")
 
 	// Enable remain-on-exit BEFORE command runs so we can inspect exit status
 	_, _ = t.run("set-option", "-t", name, "remain-on-exit", "on")
@@ -402,27 +423,9 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 
 	// Two-step creation: create session with env vars and default shell, then
 	// replace the shell with the actual command after configuring remain-on-exit.
-	args := []string{"new-session", "-d", "-s", name}
-	if workDir != "" {
-		args = append(args, "-c", workDir)
-	}
-	// Add -e flags to set environment variables in the session before the shell starts.
-	// Keys are sorted for deterministic behavior.
-	keys := make([]string, 0, len(env))
-	for k := range env {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		args = append(args, "-e", fmt.Sprintf("%s=%s", k, env[k]))
-	}
-	if _, err := t.run(args...); err != nil {
+	if err := t.createNewSession(name, workDir, env); err != nil {
 		return err
 	}
-	// tmux 3.3+ sets window-size=manual on detached sessions (no client present),
-	// which locks the window at 80x24 even after a client attaches. Override to
-	// "latest" so the window auto-resizes to the attaching client's terminal size.
-	_, _ = t.run("set-option", "-wt", name, "window-size", "latest")
 
 	// Enable remain-on-exit BEFORE command runs so we can inspect exit status
 	_, _ = t.run("set-option", "-t", name, "remain-on-exit", "on")

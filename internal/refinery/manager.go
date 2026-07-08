@@ -460,7 +460,7 @@ func (m *Manager) issueToMR(issue *beads.Issue) *MergeRequest {
 		return &MergeRequest{
 			ID:           issue.ID,
 			IssueID:      issue.ID,
-			Status:       MROpen,
+			Status:       mrStatusFromIssue(issue),
 			CreatedAt:    parseTime(issue.CreatedAt),
 			TargetBranch: defaultBranch,
 		}
@@ -476,12 +476,28 @@ func (m *Manager) issueToMR(issue *beads.Issue) *MergeRequest {
 		ID:           issue.ID,
 		Branch:       fields.Branch,
 		Worker:       fields.Worker,
+		AgentBead:    fields.AgentBead,
 		IssueID:      fields.SourceIssue,
 		TargetBranch: target,
 		MergeCommit:  fields.MergeCommit,
-		Status:       MROpen,
+		Status:       mrStatusFromIssue(issue),
+		CloseReason:  CloseReason(fields.CloseReason),
 		CreatedAt:    parseTime(issue.CreatedAt),
 	}
+}
+
+func mrStatusFromIssue(issue *beads.Issue) MRStatus {
+	if issue == nil {
+		return MROpen
+	}
+	status := beads.IssueStatus(strings.TrimSpace(issue.Status))
+	if status.IsTerminal() {
+		return MRClosed
+	}
+	if status == "in_progress" {
+		return MRInProgress
+	}
+	return MROpen
 }
 
 // parseTime parses a time string, returning zero time on error.
@@ -552,6 +568,25 @@ func (m *Manager) FindMR(idOrBranch string) (*MergeRequest, error) {
 	return nil, ErrMRNotFound
 }
 
+func (m *Manager) findMRForTerminalCleanup(idOrBranch string, b *beads.Beads) (*MergeRequest, error) {
+	mr, err := m.FindMR(idOrBranch)
+	if err == nil {
+		return mr, nil
+	}
+	if !errors.Is(err, ErrMRNotFound) {
+		return nil, err
+	}
+
+	issue, showErr := b.Show(idOrBranch)
+	if showErr != nil {
+		return nil, err
+	}
+	if issue == nil || !beads.HasLabel(issue, "gt:merge-request") {
+		return nil, err
+	}
+	return m.issueToMR(issue), nil
+}
+
 // Retry is deprecated - the Refinery agent handles retry logic autonomously.
 // ZFC-compliant: no state file, agent uses beads issue status.
 // The agent will automatically retry failed MRs in its patrol cycle.
@@ -571,31 +606,41 @@ func (m *Manager) RegisterMR(_ *MergeRequest) error {
 // It closes the MR with rejected status and optionally notifies the worker.
 // Returns the rejected MR for display purposes.
 func (m *Manager) RejectMR(idOrBranch string, reason string, notify bool) (*MergeRequest, error) {
-	mr, err := m.FindMR(idOrBranch)
+	b := beads.New(m.rig.BeadsPath())
+	mr, err := m.findMRForTerminalCleanup(idOrBranch, b)
 	if err != nil {
 		return nil, err
 	}
 
-	// Verify MR is open or in_progress (can't reject already closed)
-	if mr.IsClosed() {
-		return nil, fmt.Errorf("%w: MR is already closed with reason: %s", ErrClosedImmutable, mr.CloseReason)
-	}
-
-	// Close the bead in storage with the rejection reason
-	b := beads.New(m.rig.BeadsPath())
-	if err := b.CloseWithReason("rejected: "+reason, mr.ID); err != nil {
+	closeResult, err := closeTerminalMR(b, mr.ID, terminalMRCloseOptions{
+		Reason:        "rejected: " + reason,
+		AgentBeadHint: mr.AgentBead,
+	})
+	if err != nil {
 		return nil, fmt.Errorf("failed to close MR bead: %w", err)
+	}
+	if closeResult.AgentBead != "" {
+		mr.AgentBead = closeResult.AgentBead
+	}
+	if closeResult.AgentActiveMRClearErr != nil {
+		_, _ = fmt.Fprintf(m.output, "Warning: failed to clear agent bead %s active_mr: %v\n", closeResult.AgentBead, closeResult.AgentActiveMRClearErr)
 	}
 
 	// Update in-memory state for return value
-	if err := mr.Close(CloseReasonRejected); err != nil {
-		// Non-fatal: bead is already closed, just log
-		_, _ = fmt.Fprintf(m.output, "Warning: failed to update MR state: %v\n", err)
+	if closeResult.Closed {
+		if err := mr.Close(CloseReasonRejected); err != nil {
+			// Non-fatal: bead is already closed, just log
+			_, _ = fmt.Fprintf(m.output, "Warning: failed to update MR state: %v\n", err)
+		}
+	} else if closeResult.AlreadyTerminal {
+		mr.Status = MRClosed
+	} else {
+		return nil, fmt.Errorf("failed to close MR bead: MR %s status is not open or terminal", mr.ID)
 	}
 	mr.Error = reason
 
 	// Optionally notify worker
-	if notify {
+	if notify && !closeResult.AlreadyTerminal {
 		m.notifyWorkerRejected(mr, reason)
 	}
 
@@ -615,7 +660,8 @@ type PostMergeResult struct {
 // It closes the MR bead and its source issue. Branch deletion is handled
 // by the caller since the Manager doesn't have git access.
 func (m *Manager) PostMerge(idOrBranch string) (*PostMergeResult, error) {
-	mr, err := m.FindMR(idOrBranch)
+	b := beads.New(m.rig.BeadsPath())
+	mr, err := m.findMRForTerminalCleanup(idOrBranch, b)
 	if err != nil {
 		return nil, err
 	}
@@ -625,20 +671,37 @@ func (m *Manager) PostMerge(idOrBranch string) (*PostMergeResult, error) {
 		SourceIssueID: mr.IssueID,
 	}
 
-	b := beads.New(m.rig.BeadsPath())
-
 	// Close the MR bead
-	if mr.IsClosed() {
+	closeResult, err := closeTerminalMR(b, mr.ID, terminalMRCloseOptions{
+		Reason:        string(CloseReasonMerged),
+		MergeCommit:   mr.MergeCommit,
+		AgentBeadHint: mr.AgentBead,
+	})
+	if err != nil {
+		return result, fmt.Errorf("closing MR bead: %w", err)
+	}
+	if closeResult.AgentBead != "" {
+		mr.AgentBead = closeResult.AgentBead
+	}
+	if closeResult.AgentActiveMRClearErr != nil {
+		_, _ = fmt.Fprintf(m.output, "Warning: failed to clear agent bead %s active_mr: %v\n", closeResult.AgentBead, closeResult.AgentActiveMRClearErr)
+	}
+	if closeResult.AlreadyTerminal {
 		_, _ = fmt.Fprintf(m.output, "  %s MR already closed\n", style.Dim.Render("—"))
 		result.MRClosed = true
-	} else {
-		if err := b.CloseWithReason("merged", mr.ID); err != nil {
-			return result, fmt.Errorf("closing MR bead: %w", err)
+		if mr.CloseReason != CloseReasonMerged {
+			if mr.CloseReason == "" {
+				return result, fmt.Errorf("post-merge retry for already-closed MR %s requires close_reason=%s", mr.ID, CloseReasonMerged)
+			}
+			return result, fmt.Errorf("post-merge retry for already-closed MR %s has close_reason=%s", mr.ID, mr.CloseReason)
 		}
+	} else if closeResult.Closed {
 		if closeErr := mr.Close(CloseReasonMerged); closeErr != nil {
 			_, _ = fmt.Fprintf(m.output, "Warning: failed to update MR state: %v\n", closeErr)
 		}
 		result.MRClosed = true
+	} else {
+		return result, fmt.Errorf("closing MR bead: MR %s status is not open or terminal", mr.ID)
 	}
 
 	// Close the source issue with reason and --force to bypass dependency checks.

@@ -238,6 +238,8 @@ func issueFilterFromListOpts(opts ListOptions) beadsdk.IssueFilter {
 	if opts.Ephemeral {
 		eph := true
 		f.Ephemeral = &eph
+	} else {
+		f.SkipWisps = true
 	}
 
 	return f

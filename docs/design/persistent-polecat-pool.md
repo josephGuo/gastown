@@ -34,7 +34,7 @@ IDENTITY (persistent)
 
 SANDBOX (per-assignment, reusable)
   Worktree: polecats/furiosa/gastown/
-  Branch: polecat/furiosa/<issue>@<timestamp>
+  Branch: polecat/furiosa/<issue>+<timestamp>
   Lifecycle: synced to main between assignments, not destroyed
 
 SESSION (ephemeral)
@@ -95,14 +95,14 @@ When work completes and MR is merged (or no code changes):
 # In the polecat's worktree
 git checkout main
 git pull origin main
-git branch -D polecat/furiosa/<old-issue>@<timestamp>
+git branch -D polecat/furiosa/<old-issue>+<timestamp>
 # Worktree is now clean, on main, ready for next assignment
 ```
 
 When new work is slung:
 ```bash
 # Create fresh branch from current main
-git checkout -b polecat/furiosa/<new-issue>@<timestamp>
+git checkout -b polecat/furiosa/<new-issue>+<timestamp>
 # Start working
 ```
 

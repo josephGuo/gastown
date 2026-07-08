@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -148,6 +149,127 @@ func TestUnresolvedBlockingDependencyIDs(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestIssueDepUnmarshalRelationTypeFallbackFeedsBlockerSemantics(t *testing.T) {
+	issue := unmarshalIssueForTest(t, `{
+		"id":"gt-target",
+		"status":"open",
+		"issue_type":"task",
+		"dependencies":[
+			{"id":"gt-blocks","status":"open","issue_type":"task","type":"blocks"},
+			{"id":"gt-conditional","status":"open","issue_type":"task","type":"conditional-blocks"},
+			{"id":"gt-waits","status":"open","issue_type":"task","type":"waits-for"},
+			{"id":"gt-merge","status":"open","issue_type":"task","type":"merge-blocks"},
+			{"id":"gt-task","status":"open","issue_type":"task","type":"task"}
+		]
+	}`)
+
+	got, _ := unresolvedBlockingDependencyIDs(issue)
+	want := []string{"gt-blocks", "gt-conditional", "gt-waits", "gt-merge"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("unresolvedBlockingDependencyIDs() = %#v, want %#v", got, want)
+	}
+	if dep := issue.Dependencies[4]; dep.DependencyType != "" {
+		t.Fatalf("unknown fallback type populated DependencyType = %q, want empty", dep.DependencyType)
+	}
+}
+
+func TestIssueDepUnmarshalDependencyTypeTakesPrecedenceOverType(t *testing.T) {
+	issue := unmarshalIssueForTest(t, `{
+		"id":"gt-target",
+		"status":"open",
+		"issue_type":"task",
+		"dependencies":[
+			{"id":"gt-canonical-blocks","status":"open","issue_type":"task","dependency_type":"blocks","type":"tracks"},
+			{"id":"gt-canonical-tracks","status":"open","issue_type":"task","dependency_type":"tracks","type":"blocks"}
+		]
+	}`)
+
+	if got := issue.Dependencies[0].DependencyType; got != "blocks" {
+		t.Fatalf("DependencyType with canonical blocks = %q, want blocks", got)
+	}
+	if got := issue.Dependencies[1].DependencyType; got != "tracks" {
+		t.Fatalf("DependencyType with canonical tracks = %q, want tracks", got)
+	}
+	if got := HasUnresolvedBlockers(issue); !got {
+		t.Fatal("canonical blocks dependency should still block")
+	}
+	if got := FirstUnresolvedBlockerID(issue); got != "gt-canonical-blocks" {
+		t.Fatalf("FirstUnresolvedBlockerID() = %q, want gt-canonical-blocks", got)
+	}
+}
+
+func TestIssueDepUnmarshalPreservesIssueTypeSeparatelyFromRelationType(t *testing.T) {
+	issue := unmarshalIssueForTest(t, `{
+		"id":"gt-target",
+		"status":"open",
+		"issue_type":"task",
+		"dependencies":[
+			{"id":"gt-blocker","status":"open","issue_type":"bug","type":"blocks"}
+		]
+	}`)
+
+	dep := issue.Dependencies[0]
+	if dep.Type != "bug" {
+		t.Fatalf("IssueDep.Type = %q, want issue_type bug", dep.Type)
+	}
+	if dep.DependencyType != "blocks" {
+		t.Fatalf("IssueDep.DependencyType = %q, want blocks", dep.DependencyType)
+	}
+}
+
+func TestIssueDepUnmarshalPreservesNonblockingRelationTypes(t *testing.T) {
+	issue := unmarshalIssueForTest(t, `{
+		"id":"gt-target",
+		"status":"open",
+		"issue_type":"task",
+		"dependencies":[
+			{"id":"gt-track","status":"open","issue_type":"task","type":"tracks"},
+			{"id":"gt-parent","status":"open","issue_type":"task","type":"parent-child"},
+			{"id":"gt-related","status":"open","issue_type":"task","type":"related"},
+			{"id":"gt-discovered","status":"open","issue_type":"task","type":"discovered-from"},
+			{"id":"gt-thread","status":"open","issue_type":"task","type":"thread"}
+		]
+	}`)
+
+	wantTypes := []string{"tracks", "parent-child", "related", "discovered-from", "thread"}
+	for i, want := range wantTypes {
+		if got := issue.Dependencies[i].DependencyType; got != want {
+			t.Fatalf("Dependencies[%d].DependencyType = %q, want %q", i, got, want)
+		}
+	}
+	if HasUnresolvedBlockers(issue) {
+		t.Fatalf("nonblocking fallback relations should not block: %#v", issue.Dependencies)
+	}
+}
+
+func TestIssueDepUnmarshalMergeBlocksRequireMergedCloseReason(t *testing.T) {
+	issue := unmarshalIssueForTest(t, `{
+		"id":"gt-target",
+		"status":"open",
+		"issue_type":"task",
+		"dependencies":[
+			{"id":"gt-open","status":"open","issue_type":"task","type":"merge-blocks"},
+			{"id":"gt-closed","status":"closed","issue_type":"task","type":"merge-blocks"},
+			{"id":"gt-merged","status":"closed","issue_type":"task","type":"merge-blocks","close_reason":"Merged in abc123"}
+		]
+	}`)
+
+	got, _ := unresolvedBlockingDependencyIDs(issue)
+	want := []string{"gt-open", "gt-closed"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("unresolvedBlockingDependencyIDs() = %#v, want %#v", got, want)
+	}
+}
+
+func unmarshalIssueForTest(t *testing.T, data string) *Issue {
+	t.Helper()
+	var issue Issue
+	if err := json.Unmarshal([]byte(data), &issue); err != nil {
+		t.Fatalf("json.Unmarshal(Issue): %v", err)
+	}
+	return &issue
 }
 
 func TestHasUnresolvedBlockersFallsBackToListFields(t *testing.T) {

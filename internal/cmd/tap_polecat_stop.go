@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -21,7 +22,7 @@ but forget to call gt done before the session ends.
 This command is designed to run from a Claude Code Stop hook. It checks:
 1. Whether this is a polecat session (GT_POLECAT env var)
 2. Whether gt done has already run (heartbeat state is "exiting" or "idle")
-3. Whether the polecat has commits on its branch
+3. Whether the polecat has commits, stashes, or non-runtime dirty work
 
 If the polecat has pending work that wasn't submitted, this command
 runs gt done to submit it. If gt done already ran or there's nothing
@@ -68,7 +69,7 @@ func runTapPolecatStop(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Check if the polecat is on a feature branch with commits
+	// Check if the polecat is on a feature branch with work to submit.
 	rigName := os.Getenv("GT_RIG")
 	if rigName == "" {
 		return nil
@@ -97,20 +98,14 @@ func runTapPolecatStop(cmd *cobra.Command, args []string) error {
 		return nil // On default branch — nothing to submit
 	}
 
-	// Check for commits ahead of origin/main
-	aheadCmd := exec.Command("git", "-C", cloneDir, "rev-list", "--count", "origin/main..HEAD")
-	aheadOut, err := aheadCmd.Output()
-	if err != nil {
-		return nil // Can't check — exit quietly (don't block session stop)
-	}
-	ahead := strings.TrimSpace(string(aheadOut))
-	if ahead == "0" {
-		return nil // No commits ahead — nothing to submit
+	pending, reason, err := polecatStopPendingWork(cloneDir, branch)
+	if err != nil || !pending {
+		return nil // Can't check, or no work to submit — don't block session stop
 	}
 
 	// Polecat has pending work! Run gt done as a safety net.
 	fmt.Fprintf(os.Stderr, "\n")
-	fmt.Fprintf(os.Stderr, "⚠️  Polecat %s has %s unpushed commit(s) on branch %s\n", polecatName, ahead, branch)
+	fmt.Fprintf(os.Stderr, "⚠️  Polecat %s has pending work on branch %s (%s)\n", polecatName, branch, reason)
 	fmt.Fprintf(os.Stderr, "   Auto-running gt done as safety net...\n")
 	fmt.Fprintf(os.Stderr, "\n")
 
@@ -136,4 +131,29 @@ func runTapPolecatStop(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func polecatStopPendingWork(cloneDir, branch string) (bool, string, error) {
+	g := git.NewGit(cloneDir)
+	workStatus, err := g.CheckUncommittedWork()
+	if err != nil {
+		return false, "", err
+	}
+
+	if workStatus.HasUncommittedChanges && !workStatus.CleanExcludingRuntime() {
+		return true, fmt.Sprintf("%d non-runtime dirty file(s)", len(workStatus.NonRuntimePaths())), nil
+	}
+	if workStatus.StashCount > 0 {
+		return true, fmt.Sprintf("%d branch stash(es)", workStatus.StashCount), nil
+	}
+
+	targetStatus, err := g.BranchTargetStatus(branch, "origin", nil)
+	if err != nil {
+		return false, "", err
+	}
+	if !targetStatus.Preserved && targetStatus.UnpreservedPatchCount > 0 {
+		return true, fmt.Sprintf("%d unsubmitted commit(s)", targetStatus.UnpreservedPatchCount), nil
+	}
+
+	return false, "", nil
 }

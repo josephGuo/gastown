@@ -1361,29 +1361,8 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) {
 
 	// Update and close the MR bead
 	if mr.ID != "" {
-		// Fetch the MR bead to update its fields
-		mrBead, err := e.beads.Show(mr.ID)
-		if err != nil {
-			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to fetch MR bead %s: %v\n", mr.ID, err)
-		} else {
-			// Update MR with merge_commit SHA and close_reason
-			mrFields := beads.ParseMRFields(mrBead)
-			if mrFields == nil {
-				mrFields = &beads.MRFields{}
-			}
-			mrFields.MergeCommit = result.MergeCommit
-			mrFields.CloseReason = "merged"
-			newDesc := beads.SetMRFields(mrBead, mrFields)
-			if err := e.beads.Update(mr.ID, beads.UpdateOptions{Description: &newDesc}); err != nil {
-				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to update MR %s with merge commit: %v\n", mr.ID, err)
-			}
-		}
-
-		// Close MR bead with reason 'merged'
-		if err := e.beads.CloseWithReason("merged", mr.ID); err != nil {
+		if err := e.closeMRWithReason(mr, string(CloseReasonMerged), result.MergeCommit); err != nil {
 			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to close MR %s: %v\n", mr.ID, err)
-		} else {
-			_, _ = fmt.Fprintf(e.output, "[Engineer] Closed MR bead: %s\n", mr.ID)
 		}
 	}
 
@@ -1412,13 +1391,6 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) {
 	// Conflict beads otherwise outlive the successful re-land of their content
 	// and rot as open issues (re-dlcs/re-4i3b/re-gcii pattern).
 	e.closeSupersededConflictArtifacts(mr)
-
-	// 1.5. Clear agent bead's active_mr reference (traceability cleanup)
-	if mr.AgentBead != "" {
-		if err := e.clearAgentActiveMR(mr.AgentBead); err != nil {
-			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to clear agent bead %s active_mr: %v\n", mr.AgentBead, err)
-		}
-	}
 
 	// 2. Delete source branch (local and remote).
 	// Polecat branches (polecat/*) are always cleaned up — they are ephemeral
@@ -1467,10 +1439,6 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) {
 
 	// 5. Log success
 	_, _ = fmt.Fprintf(e.output, "[Engineer] ✓ Merged: %s (commit: %s)\n", mr.ID, result.MergeCommit)
-}
-
-func (e *Engineer) clearAgentActiveMR(agentBeadID string) error {
-	return e.beads.ForAgentBead().UpdateAgentActiveMR(agentBeadID, "")
 }
 
 // HandleMRInfoFailure handles a failed merge from MRInfo.
@@ -1600,42 +1568,43 @@ func (e *Engineer) closeIneligibleMR(mr *MRInfo, reason string) error {
 	return e.closeMRWithReason(mr, "rejected: "+reason)
 }
 
-func (e *Engineer) closeMRWithReason(mr *MRInfo, closeReason string) error {
+func (e *Engineer) closeMRWithReason(mr *MRInfo, closeReason string, mergeCommit ...string) error {
 	if mr == nil || strings.TrimSpace(mr.ID) == "" {
 		return nil
 	}
-	issue, err := e.beads.Show(mr.ID)
+	var commit string
+	if len(mergeCommit) > 0 {
+		commit = mergeCommit[0]
+	}
+	result, err := closeTerminalMR(e.beads, mr.ID, terminalMRCloseOptions{
+		Reason:        closeReason,
+		MergeCommit:   commit,
+		AgentBeadHint: mr.AgentBead,
+		MissingOK:     true,
+	})
 	if err != nil {
-		if !errors.Is(err, beads.ErrNotFound) {
-			return fmt.Errorf("fetch MR for close: %w", err)
-		}
-		return nil
+		return err
 	}
-	if issue == nil || beads.IssueStatus(issue.Status) != beads.StatusOpen {
-		return nil
+	if result.Closed {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Closed MR bead: %s (%s)\n", mr.ID, closeReason)
 	}
-
-	fields := beads.ParseMRFields(issue)
-	if fields == nil {
-		fields = &beads.MRFields{}
+	if result.AgentActiveMRClearErr != nil {
+		_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to clear agent bead %s active_mr: %v\n", result.AgentBead, result.AgentActiveMRClearErr)
 	}
-	fields.CloseReason = normalizedMRCloseReason(closeReason)
-	newDesc := beads.SetMRFields(issue, fields)
-	if err := e.beads.Update(mr.ID, beads.UpdateOptions{Description: &newDesc}); err != nil {
-		return fmt.Errorf("record MR close reason: %w", err)
-	}
-
-	if err := e.beads.CloseWithReason(closeReason, mr.ID); err != nil {
-		return fmt.Errorf("close MR: %w", err)
-	}
-	_, _ = fmt.Fprintf(e.output, "[Engineer] Closed MR bead: %s (%s)\n", mr.ID, closeReason)
 	return nil
 }
 
 func normalizedMRCloseReason(closeReason string) string {
 	closeReason = strings.TrimSpace(closeReason)
-	if strings.HasPrefix(strings.ToLower(closeReason), "rejected:") {
+	lower := strings.ToLower(closeReason)
+	if strings.HasPrefix(lower, "rejected:") {
 		return string(CloseReasonRejected)
+	}
+	if strings.HasPrefix(lower, "superseded") {
+		return string(CloseReasonSuperseded)
+	}
+	if strings.HasPrefix(lower, "conflict") {
+		return string(CloseReasonConflict)
 	}
 	return closeReason
 }
@@ -1817,7 +1786,7 @@ func (e *Engineer) closeSupersededConflictArtifacts(merged *MRInfo) {
 			continue
 		}
 		reason := fmt.Sprintf("superseded by %s", merged.ID)
-		if err := e.beads.CloseWithReason(reason, other.ID); err != nil {
+		if err := e.closeMRWithReason(other, reason); err != nil {
 			_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to close superseded MR %s: %v\n", other.ID, err)
 		} else {
 			_, _ = fmt.Fprintf(e.output, "[Engineer] Closed superseded MR %s: %s\n", other.ID, reason)

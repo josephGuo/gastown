@@ -137,10 +137,10 @@ branch in step 2.
 **2. Create a fresh branch NAMED FOR THE HOOKED BEAD:**
 ```bash
 git fetch origin
-git checkout -b "polecat/<name>/{{issue}}@$(openssl rand -hex 3)" origin/{{base_branch}}
+git checkout -b "polecat/<name>/{{issue}}+$(openssl rand -hex 3)" origin/{{base_branch}}
 ```
 
-The format is `polecat/<your-name>/<bead-id>@<short-unique-suffix>`. The
+The format is `polecat/<your-name>/<bead-id>+<short-unique-suffix>`. The
 embedded bead-id is what makes MR attribution work; the suffix keeps the
 name unique across re-dispatches of the same bead.
 

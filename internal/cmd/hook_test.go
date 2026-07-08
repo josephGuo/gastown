@@ -145,6 +145,11 @@ func TestNormalizeHookShowTarget(t *testing.T) {
 			target: "this-is-not-an-agent-path",
 			want:   "this-is-not-an-agent-path",
 		},
+		{
+			name:   "path traversal shorthand stays unchanged",
+			target: "../toast",
+			want:   "../toast",
+		},
 	}
 
 	for _, tt := range tests {

@@ -729,6 +729,33 @@ func TestHasSubmittableWorkForRecoveryUsesExplicitTargetCherry(t *testing.T) {
 	}
 }
 
+func TestHasSubmittableWorkForRecoveryUsesExplicitTargetSquashNoop(t *testing.T) {
+	repo := setupRecoveryGitRepo(t)
+	if err := exec.Command("git", "-C", repo, "merge-tree", "--write-tree", "HEAD", "HEAD").Run(); err != nil {
+		t.Skipf("git merge-tree --write-tree unsupported: %v", err)
+	}
+	runGit(t, repo, "switch", "-c", "polecat/squash")
+	writeRecoveryFile(t, filepath.Join(repo, "squash.txt"), "one\n")
+	runGit(t, repo, "add", "squash.txt")
+	runGit(t, repo, "commit", "-m", "checkpoint one")
+	writeRecoveryFile(t, filepath.Join(repo, "squash.txt"), "one\ntwo\n")
+	runGit(t, repo, "add", "squash.txt")
+	runGit(t, repo, "commit", "-m", "checkpoint two")
+
+	runGit(t, repo, "switch", "integration/test")
+	runGit(t, repo, "merge", "--squash", "polecat/squash")
+	runGit(t, repo, "commit", "-m", "squash polecat work")
+	writeRecoveryFile(t, filepath.Join(repo, "target.txt"), "target advanced\n")
+	runGit(t, repo, "add", "target.txt")
+	runGit(t, repo, "commit", "-m", "advance target")
+	runGit(t, repo, "push", "origin", "integration/test")
+	runGit(t, repo, "switch", "polecat/squash")
+
+	if got := hasSubmittableWorkForRecovery(repo, []string{"integration/test"}, &GitState{UnpushedCommits: 99}, nil); got {
+		t.Fatal("squash-preserved branch on advanced explicit target should not require MQ submission")
+	}
+}
+
 func TestHasSubmittableWorkForRecoveryKeepsExplicitTargetUniquePatch(t *testing.T) {
 	repo := setupRecoveryGitRepo(t)
 	runGit(t, repo, "switch", "-c", "polecat/unique")

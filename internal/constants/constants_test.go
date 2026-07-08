@@ -42,6 +42,23 @@ func TestBeadsCustomTypesList(t *testing.T) {
 	}
 }
 
+func TestBeadsInfraTypesList(t *testing.T) {
+	types := BeadsInfraTypesList()
+	expected := []string{"agent", "role", "message"}
+
+	if len(types) != len(expected) {
+		t.Fatalf("BeadsInfraTypesList() returned %d items, want %d", len(types), len(expected))
+	}
+	for i, typ := range types {
+		if typ != expected[i] {
+			t.Errorf("BeadsInfraTypesList()[%d] = %q, want %q", i, typ, expected[i])
+		}
+		if typ == "rig" {
+			t.Fatal("rig must stay durable and must not be an infra type")
+		}
+	}
+}
+
 func TestMayorRigsPath(t *testing.T) {
 	got := MayorRigsPath("/town")
 	expect := "/town/mayor/rigs.json"

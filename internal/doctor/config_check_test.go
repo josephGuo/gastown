@@ -34,9 +34,19 @@ case "$1:$2:$3" in
       exit 1
     fi
     ;;
-  config:set:types.custom)
-    printf '%s\n' "$4" > "$target/types.custom"
-    ;;
+	  config:set:types.custom)
+	    printf '%s\n' "$4" > "$target/types.custom"
+	    ;;
+	  config:get:types.infra)
+	    if [ -f "$target/types.infra" ]; then
+	      cat "$target/types.infra"
+	    else
+	      exit 1
+	    fi
+	    ;;
+	  config:set:types.infra)
+	    printf '%s\n' "$4" > "$target/types.infra"
+	    ;;
   config:get:status.custom)
     if [ -f "$target/status.custom" ]; then
       cat "$target/status.custom"
@@ -611,6 +621,9 @@ func TestCustomTypesCheck_UsesRigScopedBeadsDir(t *testing.T) {
 	if got := readConfigCheckFile(t, townBeadsDir, "types.custom"); got != constants.BeadsCustomTypes {
 		t.Fatalf("town types.custom changed unexpectedly: %q", got)
 	}
+	if got := readConfigCheckFile(t, rigBeadsDir, "types.infra"); got != constants.BeadsInfraTypes {
+		t.Fatalf("rig types.infra = %q, want %q", got, constants.BeadsInfraTypes)
+	}
 
 	result = check.Run(ctx)
 	if result.Status != StatusOK {
@@ -650,6 +663,66 @@ func TestCustomTypesCheck_FixPreservesExistingRigTypes(t *testing.T) {
 	}
 	if len(wantSet) != 0 {
 		t.Fatalf("rig types.custom missing expected entries after fix: %v (got %q)", wantSet, strings.Join(got, ","))
+	}
+	if got := readConfigCheckFile(t, rigBeadsDir, "types.infra"); got != constants.BeadsInfraTypes {
+		t.Fatalf("rig types.infra = %q, want %q", got, constants.BeadsInfraTypes)
+	}
+}
+
+func TestCustomTypesCheck_FixesStaleInfraTypes(t *testing.T) {
+	townRoot := t.TempDir()
+	rigDir := filepath.Join(townRoot, "gastown")
+	rigBeadsDir := filepath.Join(rigDir, ".beads")
+
+	writeConfigCheckFile(t, rigBeadsDir, "types.custom", constants.BeadsCustomTypes)
+	writeConfigCheckFile(t, rigBeadsDir, "types.infra", "agent,role,rig,message")
+	installFakeBdForConfigChecks(t, townRoot)
+
+	check := NewCustomTypesCheck()
+	ctx := &CheckContext{TownRoot: townRoot, RigName: "gastown"}
+
+	result := check.Run(ctx)
+	if result.Status != StatusWarning {
+		t.Fatalf("expected StatusWarning, got %v (%v)", result.Status, result.Details)
+	}
+	if !strings.Contains(strings.Join(result.Details, "\n"), "rig must not be an infra type") {
+		t.Fatalf("expected rig infra warning, got %v", result.Details)
+	}
+
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix failed: %v", err)
+	}
+	if got := readConfigCheckFile(t, rigBeadsDir, "types.infra"); got != constants.BeadsInfraTypes {
+		t.Fatalf("rig types.infra = %q, want %q", got, constants.BeadsInfraTypes)
+	}
+
+	result = check.Run(ctx)
+	if result.Status != StatusOK {
+		t.Fatalf("expected StatusOK after fix, got %v (%v)", result.Status, result.Details)
+	}
+}
+
+func TestCustomTypesCheck_FixesMissingInfraTypes(t *testing.T) {
+	townRoot := t.TempDir()
+	rigDir := filepath.Join(townRoot, "gastown")
+	rigBeadsDir := filepath.Join(rigDir, ".beads")
+
+	writeConfigCheckFile(t, rigBeadsDir, "types.custom", constants.BeadsCustomTypes)
+	installFakeBdForConfigChecks(t, townRoot)
+
+	check := NewCustomTypesCheck()
+	ctx := &CheckContext{TownRoot: townRoot, RigName: "gastown"}
+
+	result := check.Run(ctx)
+	if result.Status != StatusWarning {
+		t.Fatalf("expected StatusWarning, got %v (%v)", result.Status, result.Details)
+	}
+
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix failed: %v", err)
+	}
+	if got := readConfigCheckFile(t, rigBeadsDir, "types.infra"); got != constants.BeadsInfraTypes {
+		t.Fatalf("rig types.infra = %q, want %q", got, constants.BeadsInfraTypes)
 	}
 }
 

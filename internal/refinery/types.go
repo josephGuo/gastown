@@ -21,6 +21,9 @@ type MergeRequest struct {
 	// Worker is the polecat that created this branch.
 	Worker string `json:"worker"`
 
+	// AgentBead is the town-level agent bead that owns active_mr for this MR.
+	AgentBead string `json:"agent_bead,omitempty"`
+
 	// IssueID is the beads issue being worked on.
 	IssueID string `json:"issue_id"`
 

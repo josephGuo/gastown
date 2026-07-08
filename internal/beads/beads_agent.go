@@ -565,6 +565,49 @@ func (b *Beads) UpdateAgentActiveMR(id string, activeMR string) error {
 	return b.UpdateAgentDescriptionFields(id, AgentFieldUpdates{ActiveMR: &activeMR})
 }
 
+// ClearAgentActiveMRIfMatches clears active_mr only when it still references
+// expectedMR. It returns true when a clear was written.
+func (b *Beads) ClearAgentActiveMRIfMatches(id string, expectedMR string) (bool, error) {
+	if target := b.agentBeadTarget(); target != b {
+		return target.ClearAgentActiveMRIfMatches(id, expectedMR)
+	}
+
+	id = strings.TrimSpace(id)
+	expectedMR = strings.TrimSpace(expectedMR)
+	if id == "" || expectedMR == "" {
+		return false, nil
+	}
+
+	fl, lockErr := b.lockAgentBead(id)
+	if lockErr != nil {
+		return false, fmt.Errorf("locking agent bead %s: %w", id, lockErr)
+	}
+	defer func() { _ = fl.Unlock() }()
+
+	issue, err := b.Show(id)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	if !IsAgentBead(issue) {
+		return false, fmt.Errorf("%s is not an agent bead", id)
+	}
+
+	fields := ParseAgentFields(issue.Description)
+	if strings.TrimSpace(fields.ActiveMR) != expectedMR {
+		return false, nil
+	}
+
+	fields.ActiveMR = ""
+	description := FormatAgentDescription(issue.Title, fields)
+	if err := b.Update(id, UpdateOptions{Description: &description}); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // UpdateAgentNotificationLevel updates the notification_level field in an agent bead.
 // Valid levels: verbose, normal, muted (DND mode).
 // Pass empty string to reset to default (normal).

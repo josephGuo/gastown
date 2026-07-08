@@ -507,6 +507,184 @@ func TestManager_PostMerge_ClosesMRAndSourceIssue(t *testing.T) {
 	}
 }
 
+func TestManager_RejectMR_ClearsMatchingActiveMR(t *testing.T) {
+	mgr, rigPath := setupTestManager(t)
+	testutil.RequireDoltContainer(t)
+	port, _ := strconv.Atoi(testutil.DoltContainerPort())
+	b := beads.NewIsolatedWithPort(rigPath, port)
+	if err := b.Init("gt"); err != nil {
+		t.Skipf("bd init unavailable: %v", err)
+	}
+
+	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
+	if err != nil {
+		t.Fatalf("create source issue: %v", err)
+	}
+	agentIssue, err := b.Create(beads.CreateOptions{
+		Title:       "Polecat nux",
+		Labels:      []string{"gt:agent"},
+		Description: "role_type: polecat\nrig: testrig\nagent_state: working\nactive_mr: null",
+	})
+	if err != nil {
+		t.Fatalf("create agent issue: %v", err)
+	}
+	mrIssue, err := b.Create(beads.CreateOptions{
+		Title:       "MR for feature X",
+		Labels:      []string{"gt:merge-request"},
+		Description: "branch: polecat/test/gt-xyz\nsource_issue: " + srcIssue.ID + "\nworker: test\ntarget: main\nagent_bead: " + agentIssue.ID,
+	})
+	if err != nil {
+		t.Fatalf("create MR issue: %v", err)
+	}
+	if err := b.UpdateAgentActiveMR(agentIssue.ID, mrIssue.ID); err != nil {
+		t.Fatalf("set active_mr: %v", err)
+	}
+
+	result, err := mgr.RejectMR(mrIssue.ID, "policy failed", false)
+	if err != nil {
+		t.Fatalf("RejectMR() error: %v", err)
+	}
+	if result.Status != MRClosed {
+		t.Fatalf("RejectMR() status = %s, want closed", result.Status)
+	}
+
+	assertAgentActiveMR(t, b, agentIssue.ID, "")
+	assertIssueStatus(t, b, srcIssue.ID, string(beads.StatusOpen))
+	assertMRCloseReason(t, b, mrIssue.ID, string(CloseReasonRejected))
+}
+
+func TestManager_PostMerge_ClearsMatchingActiveMRAndClosesSource(t *testing.T) {
+	mgr, rigPath := setupTestManager(t)
+	testutil.RequireDoltContainer(t)
+	port, _ := strconv.Atoi(testutil.DoltContainerPort())
+	b := beads.NewIsolatedWithPort(rigPath, port)
+	if err := b.Init("gt"); err != nil {
+		t.Skipf("bd init unavailable: %v", err)
+	}
+
+	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
+	if err != nil {
+		t.Fatalf("create source issue: %v", err)
+	}
+	agentIssue, err := b.Create(beads.CreateOptions{
+		Title:       "Polecat nux",
+		Labels:      []string{"gt:agent"},
+		Description: "role_type: polecat\nrig: testrig\nagent_state: working\nactive_mr: null",
+	})
+	if err != nil {
+		t.Fatalf("create agent issue: %v", err)
+	}
+	mrIssue, err := b.Create(beads.CreateOptions{
+		Title:       "MR for feature X",
+		Labels:      []string{"gt:merge-request"},
+		Description: "branch: polecat/test/gt-xyz\nsource_issue: " + srcIssue.ID + "\nworker: test\ntarget: main\nagent_bead: " + agentIssue.ID + "\nmerge_commit: abc123",
+	})
+	if err != nil {
+		t.Fatalf("create MR issue: %v", err)
+	}
+	if err := b.UpdateAgentActiveMR(agentIssue.ID, mrIssue.ID); err != nil {
+		t.Fatalf("set active_mr: %v", err)
+	}
+
+	result, err := mgr.PostMerge(mrIssue.ID)
+	if err != nil {
+		t.Fatalf("PostMerge() error: %v", err)
+	}
+	if !result.MRClosed || !result.SourceIssueClosed {
+		t.Fatalf("PostMerge() result = %+v, want MR/source closed", result)
+	}
+
+	assertAgentActiveMR(t, b, agentIssue.ID, "")
+	assertIssueStatus(t, b, srcIssue.ID, string(beads.StatusClosed))
+	assertMRCloseReason(t, b, mrIssue.ID, string(CloseReasonMerged))
+}
+
+func TestManager_PostMerge_AlreadyClosedMRRetriesActiveMRCleanup(t *testing.T) {
+	mgr, rigPath := setupTestManager(t)
+	testutil.RequireDoltContainer(t)
+	port, _ := strconv.Atoi(testutil.DoltContainerPort())
+	b := beads.NewIsolatedWithPort(rigPath, port)
+	if err := b.Init("gt"); err != nil {
+		t.Skipf("bd init unavailable: %v", err)
+	}
+
+	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
+	if err != nil {
+		t.Fatalf("create source issue: %v", err)
+	}
+	agentIssue, err := b.Create(beads.CreateOptions{
+		Title:       "Polecat nux",
+		Labels:      []string{"gt:agent"},
+		Description: "role_type: polecat\nrig: testrig\nagent_state: working\nactive_mr: null",
+	})
+	if err != nil {
+		t.Fatalf("create agent issue: %v", err)
+	}
+	mrIssue, err := b.Create(beads.CreateOptions{
+		Title:       "Already merged MR",
+		Labels:      []string{"gt:merge-request"},
+		Description: "branch: polecat/test/gt-xyz\nsource_issue: " + srcIssue.ID + "\nworker: test\ntarget: main\nagent_bead: " + agentIssue.ID + "\nclose_reason: merged",
+	})
+	if err != nil {
+		t.Fatalf("create MR issue: %v", err)
+	}
+	if err := b.UpdateAgentActiveMR(agentIssue.ID, mrIssue.ID); err != nil {
+		t.Fatalf("set active_mr: %v", err)
+	}
+	if err := b.CloseWithReason("merged", mrIssue.ID); err != nil {
+		t.Fatalf("close MR issue: %v", err)
+	}
+
+	result, err := mgr.PostMerge(mrIssue.ID)
+	if err != nil {
+		t.Fatalf("PostMerge() error: %v", err)
+	}
+	if !result.MRClosed || !result.SourceIssueClosed {
+		t.Fatalf("PostMerge() result = %+v, want MR/source closed", result)
+	}
+
+	assertAgentActiveMR(t, b, agentIssue.ID, "")
+	assertIssueStatus(t, b, srcIssue.ID, string(beads.StatusClosed))
+}
+
+func TestManager_TerminalCloseDoesNotClearNewerActiveMR(t *testing.T) {
+	mgr, rigPath := setupTestManager(t)
+	testutil.RequireDoltContainer(t)
+	port, _ := strconv.Atoi(testutil.DoltContainerPort())
+	b := beads.NewIsolatedWithPort(rigPath, port)
+	if err := b.Init("gt"); err != nil {
+		t.Skipf("bd init unavailable: %v", err)
+	}
+
+	srcIssue, err := b.Create(beads.CreateOptions{Title: "Implement feature X", Labels: []string{"gt:task"}})
+	if err != nil {
+		t.Fatalf("create source issue: %v", err)
+	}
+	agentIssue, err := b.Create(beads.CreateOptions{
+		Title:       "Polecat nux",
+		Labels:      []string{"gt:agent"},
+		Description: "role_type: polecat\nrig: testrig\nagent_state: working\nactive_mr: gt-wisp-newer",
+	})
+	if err != nil {
+		t.Fatalf("create agent issue: %v", err)
+	}
+	mrIssue, err := b.Create(beads.CreateOptions{
+		Title:       "MR for feature X",
+		Labels:      []string{"gt:merge-request"},
+		Description: "branch: polecat/test/gt-xyz\nsource_issue: " + srcIssue.ID + "\nworker: test\ntarget: main\nagent_bead: " + agentIssue.ID,
+	})
+	if err != nil {
+		t.Fatalf("create MR issue: %v", err)
+	}
+
+	if _, err := mgr.RejectMR(mrIssue.ID, "policy failed", false); err != nil {
+		t.Fatalf("RejectMR() error: %v", err)
+	}
+
+	assertAgentActiveMR(t, b, agentIssue.ID, "gt-wisp-newer")
+	assertIssueStatus(t, b, srcIssue.ID, string(beads.StatusOpen))
+}
+
 func TestManager_PostMerge_AlreadyClosedMR(t *testing.T) {
 	mgr, rigPath := setupTestManager(t)
 	testutil.RequireDoltContainer(t)
@@ -529,10 +707,10 @@ func TestManager_PostMerge_AlreadyClosedMR(t *testing.T) {
 		t.Fatalf("close MR issue: %v", err)
 	}
 
-	// PostMerge should fail since MR is already closed and won't be in queue
+	// Already-closed MRs without a merged close_reason are not safe to post-merge.
 	_, err = mgr.PostMerge(mrIssue.ID)
 	if err == nil {
-		t.Error("PostMerge() expected error for already-closed MR")
+		t.Error("PostMerge() expected error for already-closed MR without merged close_reason")
 	}
 }
 
@@ -542,5 +720,43 @@ func TestManager_PostMerge_NotFound(t *testing.T) {
 	_, err := mgr.PostMerge("nonexistent-mr-id")
 	if err == nil {
 		t.Error("PostMerge() expected error for nonexistent MR")
+	}
+}
+
+func assertAgentActiveMR(t *testing.T, b *beads.Beads, agentID string, want string) {
+	t.Helper()
+	issue, err := b.Show(agentID)
+	if err != nil {
+		t.Fatalf("show agent %s: %v", agentID, err)
+	}
+	fields := beads.ParseAgentFields(issue.Description)
+	if fields.ActiveMR != want {
+		t.Fatalf("agent active_mr = %q, want %q", fields.ActiveMR, want)
+	}
+}
+
+func assertIssueStatus(t *testing.T, b *beads.Beads, issueID string, want string) {
+	t.Helper()
+	issue, err := b.Show(issueID)
+	if err != nil {
+		t.Fatalf("show issue %s: %v", issueID, err)
+	}
+	if issue.Status != want {
+		t.Fatalf("issue %s status = %q, want %q", issueID, issue.Status, want)
+	}
+}
+
+func assertMRCloseReason(t *testing.T, b *beads.Beads, mrID string, want string) {
+	t.Helper()
+	issue, err := b.Show(mrID)
+	if err != nil {
+		t.Fatalf("show MR %s: %v", mrID, err)
+	}
+	fields := beads.ParseMRFields(issue)
+	if fields == nil {
+		t.Fatalf("MR %s missing fields", mrID)
+	}
+	if fields.CloseReason != want {
+		t.Fatalf("MR close_reason = %q, want %q", fields.CloseReason, want)
 	}
 }

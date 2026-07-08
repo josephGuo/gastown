@@ -937,12 +937,6 @@ func (m *DoltServerManager) startLocked() error {
 		m.logger("Warning: failed to write Dolt config.yaml: %v", err)
 	}
 
-	// Build command arguments
-	args := []string{
-		"sql-server",
-		"--config", configPath,
-	}
-
 	// Open log file
 	logFile, err := os.OpenFile(m.config.LogFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
@@ -950,8 +944,7 @@ func (m *DoltServerManager) startLocked() error {
 	}
 
 	// Start dolt sql-server as background process
-	cmd := exec.Command(doltPath, args...)
-	cmd.Dir = m.config.DataDir
+	cmd := doltserver.NewSQLServerCommand(doltPath, m.config.DataDir, configPath)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 

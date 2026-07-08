@@ -3170,6 +3170,112 @@ func TestVerifyPushedCommit(t *testing.T) {
 	}
 }
 
+func TestVerifyPushedCommitReachableFromPushTarget(t *testing.T) {
+	localDir, remoteDir, mainBranch := initTestRepoWithRemote(t)
+	g := NewGit(localDir)
+
+	if err := os.WriteFile(filepath.Join(localDir, "shared.txt"), []byte("v1\n"), 0644); err != nil {
+		t.Fatalf("write v1: %v", err)
+	}
+	if err := g.Add("shared.txt"); err != nil {
+		t.Fatalf("Add v1: %v", err)
+	}
+	if err := g.Commit("shared target v1"); err != nil {
+		t.Fatalf("Commit v1: %v", err)
+	}
+	v1, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("Rev v1: %v", err)
+	}
+	if err := g.Push("origin", mainBranch, false); err != nil {
+		t.Fatalf("Push v1: %v", err)
+	}
+	if err := g.VerifyPushedCommitReachableFromPushTarget("origin", mainBranch, v1); err != nil {
+		t.Fatalf("Verify exact tip: %v", err)
+	}
+
+	cloneDir := filepath.Join(t.TempDir(), "advancer")
+	if out, err := exec.Command("git", "clone", remoteDir, cloneDir).CombinedOutput(); err != nil {
+		t.Fatalf("clone advancer: %v\n%s", err, out)
+	}
+	for _, args := range [][]string{
+		{"git", "config", "user.email", "test@test.com"},
+		{"git", "config", "user.name", "Test User"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = cloneDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s: %v\n%s", args, err, out)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(cloneDir, "shared.txt"), []byte("v2\n"), 0644); err != nil {
+		t.Fatalf("write advancer v2: %v", err)
+	}
+	for _, args := range [][]string{
+		{"git", "add", "shared.txt"},
+		{"git", "commit", "-m", "shared target v2"},
+		{"git", "push", "origin", mainBranch},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = cloneDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s: %v\n%s", args, err, out)
+		}
+	}
+	if err := g.VerifyPushedCommitReachableFromPushTarget("origin", mainBranch, v1); err != nil {
+		t.Fatalf("Verify ancestor after concurrent push: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(localDir, "shared.txt"), []byte("local-only\n"), 0644); err != nil {
+		t.Fatalf("write local-only: %v", err)
+	}
+	if err := g.Add("shared.txt"); err != nil {
+		t.Fatalf("Add local-only: %v", err)
+	}
+	if err := g.Commit("local only"); err != nil {
+		t.Fatalf("Commit local-only: %v", err)
+	}
+	localOnly, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("Rev local-only: %v", err)
+	}
+	if err := g.VerifyPushedCommitReachableFromPushTarget("origin", mainBranch, localOnly); err == nil {
+		t.Fatal("Verify should fail for commit not reachable from push target")
+	}
+	if err := g.VerifyPushedCommitReachableFromPushTarget("origin", "missing-branch", v1); err == nil {
+		t.Fatal("Verify should fail for missing branch")
+	}
+
+	for _, args := range [][]string{
+		{"git", "checkout", "--orphan", "replacement"},
+		{"git", "rm", "-rf", "."},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = cloneDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s: %v\n%s", args, err, out)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(cloneDir, "replacement.txt"), []byte("replacement\n"), 0644); err != nil {
+		t.Fatalf("write replacement: %v", err)
+	}
+	for _, args := range [][]string{
+		{"git", "add", "replacement.txt"},
+		{"git", "commit", "-m", "replace remote history"},
+		{"git", "branch", "-M", mainBranch},
+		{"git", "push", "--force", "origin", mainBranch},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = cloneDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s: %v\n%s", args, err, out)
+		}
+	}
+	if err := g.VerifyPushedCommitReachableFromPushTarget("origin", mainBranch, v1); err == nil {
+		t.Fatal("Verify should fail when stale origin/main still has commit but push target does not")
+	}
+}
+
 func TestVerifyPushedCommitSplitURL(t *testing.T) {
 	localDir, _, _, _ := initTestRepoWithSplitRemote(t)
 	g := NewGit(localDir)
@@ -3206,6 +3312,85 @@ func TestVerifyPushedCommitSplitURL(t *testing.T) {
 	}
 	if err := g.VerifyPushedCommit("origin", "polecat/verified-split", sha); err != nil {
 		t.Fatalf("VerifyPushedCommit should query push URL: %v", err)
+	}
+}
+
+func TestVerifyPushedCommitReachableFromPushTargetSplitURL(t *testing.T) {
+	localDir, _, forkDir, _ := initTestRepoWithSplitRemote(t)
+	g := NewGit(localDir)
+	branch := "integration/verified-split"
+
+	if err := g.CreateBranch(branch); err != nil {
+		t.Fatalf("CreateBranch: %v", err)
+	}
+	if err := g.Checkout(branch); err != nil {
+		t.Fatalf("Checkout: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(localDir, "split-shared.txt"), []byte("v1\n"), 0644); err != nil {
+		t.Fatalf("write v1: %v", err)
+	}
+	if err := g.Add("split-shared.txt"); err != nil {
+		t.Fatalf("Add v1: %v", err)
+	}
+	if err := g.Commit("split shared v1"); err != nil {
+		t.Fatalf("Commit v1: %v", err)
+	}
+	v1, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("Rev v1: %v", err)
+	}
+	if err := g.Push("origin", branch, false); err != nil {
+		t.Fatalf("Push v1: %v", err)
+	}
+
+	cloneDir := filepath.Join(t.TempDir(), "fork-advancer")
+	if out, err := exec.Command("git", "clone", forkDir, cloneDir).CombinedOutput(); err != nil {
+		t.Fatalf("clone fork advancer: %v\n%s", err, out)
+	}
+	for _, args := range [][]string{
+		{"git", "config", "user.email", "test@test.com"},
+		{"git", "config", "user.name", "Test User"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = cloneDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s: %v\n%s", args, err, out)
+		}
+	}
+	cmd := exec.Command("git", "checkout", branch)
+	cmd.Dir = cloneDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("checkout fork branch: %v\n%s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(cloneDir, "split-shared.txt"), []byte("v2\n"), 0644); err != nil {
+		t.Fatalf("write fork v2: %v", err)
+	}
+	for _, args := range [][]string{
+		{"git", "add", "split-shared.txt"},
+		{"git", "commit", "-m", "split shared v2"},
+		{"git", "push", "origin", branch},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = cloneDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s: %v\n%s", args, err, out)
+		}
+	}
+
+	fetchTip, err := g.RemoteBranchTip("origin", branch)
+	if err != nil {
+		t.Fatalf("RemoteBranchTip: %v", err)
+	}
+	pushTip, err := g.PushRemoteBranchTip("origin", branch)
+	if err != nil {
+		t.Fatalf("PushRemoteBranchTip: %v", err)
+	}
+	if fetchTip == pushTip {
+		t.Fatalf("test setup expected split fetch/push tips to differ, got %s", fetchTip)
+	}
+	if err := g.VerifyPushedCommitReachableFromPushTarget("origin", branch, v1); err != nil {
+		t.Fatalf("Verify should query push URL and accept ancestor: %v", err)
 	}
 }
 
@@ -3290,6 +3475,100 @@ func TestUnpushedCommitsPrefersExactRemoteBranchOverUpstream(t *testing.T) {
 	}
 	if !status.Clean() {
 		t.Fatalf("CheckUncommittedWork should be clean, got %s", status)
+	}
+}
+
+func TestComparisonRefCandidatesPreferRemoteTrackingRef(t *testing.T) {
+	got := comparisonRefCandidates("main", "origin")
+	want := []string{"upstream/main", "origin/main", "main"}
+	if len(got) != len(want) {
+		t.Fatalf("comparisonRefCandidates length = %d, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("comparisonRefCandidates()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestBranchTargetStatusPreservesSquashMergedAdvancedTarget(t *testing.T) {
+	localDir, _, mainBranch := initTestRepoWithRemote(t)
+	if err := exec.Command("git", "-C", localDir, "merge-tree", "--write-tree", "HEAD", "HEAD").Run(); err != nil {
+		t.Skipf("git merge-tree --write-tree unsupported: %v", err)
+	}
+	g := NewGit(localDir)
+	branch := "polecat/squash-preserved"
+
+	if err := g.CreateBranch(branch); err != nil {
+		t.Fatalf("CreateBranch: %v", err)
+	}
+	if err := g.Checkout(branch); err != nil {
+		t.Fatalf("Checkout: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "feature.txt"), []byte("one\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := g.Add("feature.txt"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := g.Commit("checkpoint one"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localDir, "feature.txt"), []byte("one\ntwo\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := g.Add("feature.txt"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := g.Commit("checkpoint two"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	if err := g.Checkout(mainBranch); err != nil {
+		t.Fatalf("Checkout main: %v", err)
+	}
+	runGit(t, localDir, "merge", "--squash", branch)
+	runGit(t, localDir, "commit", "-m", "squash polecat work")
+	if err := os.WriteFile(filepath.Join(localDir, "advance.txt"), []byte("target advanced\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := g.Add("advance.txt"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := g.Commit("advance target"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	runGit(t, localDir, "push", "origin", mainBranch)
+
+	if err := g.Checkout(branch); err != nil {
+		t.Fatalf("Checkout branch: %v", err)
+	}
+	status, err := g.BranchTargetStatus(branch, "origin", []string{"origin/" + mainBranch})
+	if err != nil {
+		t.Fatalf("BranchTargetStatus: %v", err)
+	}
+	if !status.Preserved || status.UnpreservedPatchCount != 0 {
+		t.Fatalf("BranchTargetStatus = %+v, want squash-preserved target", status)
+	}
+	if status.Evidence != "merge_tree_noop" {
+		t.Fatalf("Evidence = %q, want merge_tree_noop", status.Evidence)
+	}
+
+	if err := os.WriteFile(filepath.Join(localDir, "feature.txt"), []byte("one\ntwo\nthree\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := g.Add("feature.txt"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := g.Commit("extra local work"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	status, err = g.BranchTargetStatus(branch, "origin", []string{"origin/" + mainBranch})
+	if err != nil {
+		t.Fatalf("BranchTargetStatus after extra work: %v", err)
+	}
+	if status.Preserved || status.UnpreservedPatchCount == 0 {
+		t.Fatalf("BranchTargetStatus after extra work = %+v, want unpreserved work", status)
 	}
 }
 

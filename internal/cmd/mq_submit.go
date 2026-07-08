@@ -12,8 +12,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -31,39 +31,20 @@ var issuePattern = regexp.MustCompile(`([a-z]+-[a-z0-9]+(?:\.[0-9]+)?)`)
 
 // parseBranchName extracts issue ID and worker from a branch name.
 // Supports formats:
+//   - polecat/<worker>/<issue>[+|@]<suffix>  → issue=<issue>, worker=<worker>
 //   - polecat/<worker>/<issue>  → issue=<issue>, worker=<worker>
-//   - polecat/<worker>-<timestamp>  → issue="", worker=<worker> (modern polecat branches)
+//   - polecat/<worker>-<suffix>  → issue="", worker=<worker>
 //   - <issue>                   → issue=<issue>, worker=""
 func parseBranchName(branch string) branchInfo {
 	info := branchInfo{Branch: branch}
 
-	// Try polecat/<worker>/<issue> or polecat/<worker>/<issue>@<timestamp> format
-	if strings.HasPrefix(branch, constants.BranchPolecatPrefix) {
-		parts := strings.SplitN(branch, "/", 3)
-		if len(parts) == 3 {
-			info.Worker = parts[1]
-			// Strip @timestamp suffix if present (e.g., "gt-abc@mk123" -> "gt-abc")
-			issue := parts[2]
-			if atIdx := strings.Index(issue, "@"); atIdx > 0 {
-				issue = issue[:atIdx]
-			}
-			info.Issue = issue
-			return info
-		}
-		// Modern polecat branch format: polecat/<worker>-<timestamp>
-		// The second part is "worker-timestamp", not an issue ID.
-		// Don't try to extract an issue ID - gt done will use hook_bead fallback.
-		if len(parts) == 2 {
-			// Extract worker name from "worker-timestamp" format
-			workerPart := parts[1]
-			if dashIdx := strings.LastIndex(workerPart, "-"); dashIdx > 0 {
-				info.Worker = workerPart[:dashIdx]
-			} else {
-				info.Worker = workerPart
-			}
-			// Explicitly don't set info.Issue - let hook_bead fallback handle it
-			return info
-		}
+	if meta, ok := polecat.ParseBranchName(branch); ok {
+		info.Worker = meta.Polecat
+		info.Issue = meta.Issue
+		return info
+	}
+	if strings.HasPrefix(branch, "polecat/") {
+		return info
 	}
 
 	// Try to find an issue ID pattern in the branch name

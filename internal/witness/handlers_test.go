@@ -18,6 +18,109 @@ import (
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
+func TestWitnessHasSubmittableWorkUsesBranchTargetStatus(t *testing.T) {
+	repo := setupWitnessSquashPreservedRepo(t)
+	if got := witnessHasSubmittableWork(repo, []string{"integration/test"}); got {
+		t.Fatal("squash-preserved branch should not require MQ submission through witness helper")
+	}
+
+	witnessWriteFile(t, filepath.Join(repo, "feature.txt"), "one\ntwo\nthree\n")
+	runWitnessGit(t, repo, "add", "feature.txt")
+	runWitnessGit(t, repo, "commit", "-m", "extra local work")
+	if got := witnessHasSubmittableWork(repo, []string{"integration/test"}); !got {
+		t.Fatal("new local work after squash preservation should still require MQ submission")
+	}
+}
+
+func TestVerifyBranchAlreadyMergedUsesBranchTargetStatus(t *testing.T) {
+	townRoot, workDir := setupSlotOpenTestTown(t)
+	repo := filepath.Join(townRoot, "gastown", "polecats", "institute", "gastown")
+	setupWitnessSquashPreservedRepoAt(t, repo, filepath.Join(t.TempDir(), "remote.git"))
+	runWitnessGit(t, repo, "push", "origin", "integration/test:main")
+
+	merged, err := _verifyBranchAlreadyMerged(workDir, "gastown", "institute")
+	if err != nil {
+		t.Fatalf("_verifyBranchAlreadyMerged: %v", err)
+	}
+	if !merged {
+		t.Fatal("squash-preserved branch on advanced default target should be treated as already merged")
+	}
+
+	witnessWriteFile(t, filepath.Join(repo, "feature.txt"), "one\ntwo\nthree\n")
+	runWitnessGit(t, repo, "add", "feature.txt")
+	runWitnessGit(t, repo, "commit", "-m", "extra local work")
+	merged, err = _verifyBranchAlreadyMerged(workDir, "gastown", "institute")
+	if err != nil {
+		t.Fatalf("_verifyBranchAlreadyMerged after extra work: %v", err)
+	}
+	if merged {
+		t.Fatal("new local work after squash preservation should not be treated as already merged")
+	}
+}
+
+func setupWitnessSquashPreservedRepo(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	remote := filepath.Join(root, "remote.git")
+	repo := filepath.Join(root, "repo")
+	setupWitnessSquashPreservedRepoAt(t, repo, remote)
+	return repo
+}
+
+func setupWitnessSquashPreservedRepoAt(t *testing.T, repo, remote string) {
+	t.Helper()
+	runWitnessGit(t, filepath.Dir(remote), "init", "--bare", remote)
+	if err := os.MkdirAll(repo, 0755); err != nil {
+		t.Fatal(err)
+	}
+	runWitnessGit(t, repo, "init")
+	runWitnessGit(t, repo, "config", "user.email", "test@example.com")
+	runWitnessGit(t, repo, "config", "user.name", "Test User")
+	witnessWriteFile(t, filepath.Join(repo, "README.md"), "base\n")
+	runWitnessGit(t, repo, "add", "README.md")
+	runWitnessGit(t, repo, "commit", "-m", "base")
+	runWitnessGit(t, repo, "branch", "-M", "main")
+	runWitnessGit(t, repo, "remote", "add", "origin", remote)
+	runWitnessGit(t, repo, "push", "-u", "origin", "main")
+	runWitnessGit(t, repo, "switch", "-c", "integration/test")
+	runWitnessGit(t, repo, "push", "-u", "origin", "integration/test")
+	if err := exec.Command("git", "-C", repo, "merge-tree", "--write-tree", "HEAD", "HEAD").Run(); err != nil {
+		t.Skipf("git merge-tree --write-tree unsupported: %v", err)
+	}
+
+	runWitnessGit(t, repo, "switch", "-c", "polecat/squash")
+	witnessWriteFile(t, filepath.Join(repo, "feature.txt"), "one\n")
+	runWitnessGit(t, repo, "add", "feature.txt")
+	runWitnessGit(t, repo, "commit", "-m", "checkpoint one")
+	witnessWriteFile(t, filepath.Join(repo, "feature.txt"), "one\ntwo\n")
+	runWitnessGit(t, repo, "add", "feature.txt")
+	runWitnessGit(t, repo, "commit", "-m", "checkpoint two")
+	runWitnessGit(t, repo, "switch", "integration/test")
+	runWitnessGit(t, repo, "merge", "--squash", "polecat/squash")
+	runWitnessGit(t, repo, "commit", "-m", "squash polecat work")
+	witnessWriteFile(t, filepath.Join(repo, "target.txt"), "target advanced\n")
+	runWitnessGit(t, repo, "add", "target.txt")
+	runWitnessGit(t, repo, "commit", "-m", "advance target")
+	runWitnessGit(t, repo, "push", "origin", "integration/test")
+	runWitnessGit(t, repo, "switch", "polecat/squash")
+}
+
+func witnessWriteFile(t *testing.T, path, data string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func runWitnessGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
+	}
+}
+
 type testMayorEvent struct {
 	Type    string            `json:"type"`
 	Payload map[string]string `json:"payload"`
@@ -2656,33 +2759,6 @@ func TestNotifyRefineryMergeReady_EmitsChannelEvent(t *testing.T) {
 	}
 	if payload["rig"] != "dashboard" {
 		t.Errorf("payload.rig = %v, want dashboard", payload["rig"])
-	}
-}
-
-// TestCherryHasUnmergedCommits covers the git-cherry output parser used by
-// verifyBranchAlreadyMerged (aa-apw).
-func TestCherryHasUnmergedCommits(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name string
-		in   string
-		want bool
-	}{
-		{"empty output — branch has no commits beyond base", "", false},
-		{"whitespace only", "  \n\n", false},
-		{"all squash-applied (-)", "- abc123\n- def456\n", false},
-		{"one unmerged (+)", "+ abc123\n", true},
-		{"mixed", "- abc123\n+ def456\n", true},
-		{"unmerged only", "+ a\n+ b\n+ c\n", true},
-	}
-	for _, tc := range cases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := cherryHasUnmergedCommits(tc.in); got != tc.want {
-				t.Errorf("cherryHasUnmergedCommits(%q) = %v, want %v", tc.in, got, tc.want)
-			}
-		})
 	}
 }
 

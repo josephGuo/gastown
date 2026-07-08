@@ -363,6 +363,12 @@ func agentBeadToAddress(bead *agentBead) string {
 	}
 
 	id := bead.ID
+	if addr := dogAddressFromAgentBeadID(id); addr != "" {
+		return addr
+	}
+	if isDogAgentBeadIDWithoutName(id) {
+		return ""
+	}
 
 	// Handle hq- prefixed IDs (town-level format)
 	if strings.HasPrefix(id, "hq-") {
@@ -414,11 +420,7 @@ func agentBeadToAddress(bead *agentBead) string {
 			return rig + "/"
 		case "dog":
 			// Town-level named: gt-dog-alpha
-			if i+1 < len(parts) {
-				name := strings.Join(parts[i+1:], "-")
-				return "dog/" + name
-			}
-			return "dog/"
+			return dogAddressFromParts(parts, i)
 		}
 	}
 
@@ -938,6 +940,9 @@ func (r *Router) validateRecipient(identity string) error {
 	case "mayor", "mayor/", "deacon", "deacon/":
 		return nil
 	}
+	if _, ok := DogAddressName(identity); !ok && isReservedTownSubpath(identity) {
+		return fmt.Errorf("no agent found")
+	}
 
 	// Well-known rig-level singletons (rig/witness, rig/refinery) always
 	// valid — these agents are ephemeral and may not have an active session,
@@ -1005,6 +1010,10 @@ func (r *Router) validateRecipient(identity string) error {
 // validateAgentWorkspace checks if an agent's workspace directory exists on disk.
 // Used as a fallback when the agent isn't found in the bead registry.
 func (r *Router) validateAgentWorkspace(identity string) bool {
+	if _, ok := DogAddressName(identity); !ok && isReservedTownSubpath(identity) {
+		return false
+	}
+
 	parts := strings.Split(identity, "/")
 
 	switch len(parts) {
@@ -1030,7 +1039,7 @@ func (r *Router) validateAgentWorkspace(identity string) bool {
 			return dirExists(filepath.Join(r.townRoot, parts[0], parts[1], parts[2]))
 		}
 		// Dog addresses: deacon/dogs/<name>
-		if dirExists(filepath.Join(r.townRoot, parts[0], parts[1], parts[2])) {
+		if _, ok := DogAddressName(identity); ok && dirExists(filepath.Join(r.townRoot, parts[0], parts[1], parts[2])) {
 			return true
 		}
 	}
@@ -1789,6 +1798,7 @@ func prioritySeverityLabel(priority Priority) string {
 // Skipped when:
 //   - No town root (can't use nudge queue)
 //   - Message type is TypeReply (recipient is already replying)
+//   - Sender is not a direct mail address that can receive a reply
 //   - Configured delay is zero or negative (feature disabled)
 func (r *Router) enqueueReplyReminder(msg *Message, sessionID string) {
 	if r.townRoot == "" {
@@ -1796,6 +1806,9 @@ func (r *Router) enqueueReplyReminder(msg *Message, sessionID string) {
 	}
 	if msg.Type == TypeReply {
 		return // Already a reply — reminder would be redundant
+	}
+	if !senderCanReceiveReply(msg.From) {
+		return
 	}
 	delay := config.LoadOperationalConfig(r.townRoot).GetMailConfig().ReplyReminderDelayD()
 	if delay <= 0 {
@@ -1812,6 +1825,46 @@ func (r *Router) enqueueReplyReminder(msg *Message, sessionID string) {
 	if err := nudge.Enqueue(r.townRoot, sessionID, reminder); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to enqueue reply reminder for %s: %v\n", sessionID, err)
 	}
+}
+
+func senderCanReceiveReply(from string) bool {
+	if from == "" || strings.TrimSpace(from) != from || strings.ContainsAny(from, " \t\r\n") {
+		return false
+	}
+
+	identity := AddressToIdentity(from)
+	switch identity {
+	case "overseer", "mayor/", "deacon/":
+		return true
+	}
+	if identity == "" || strings.HasPrefix(identity, "@") || strings.ContainsAny(identity, ":@") {
+		return false
+	}
+
+	parts := strings.Split(identity, "/")
+	switch len(parts) {
+	case 2:
+		if !validReplyAddressPart(parts[0]) || !validReplyAddressPart(parts[1]) {
+			return false
+		}
+		if parts[0] == constants.RoleMayor || parts[0] == constants.RoleDeacon {
+			return false
+		}
+		switch parts[1] {
+		case constants.RoleCrew, "polecat", "polecats", "dogs":
+			return false
+		default:
+			return true
+		}
+	case 3:
+		return parts[0] == constants.RoleDeacon && parts[1] == "dogs" && validReplyAddressPart(parts[2])
+	default:
+		return false
+	}
+}
+
+func validReplyAddressPart(part string) bool {
+	return part != "" && strings.TrimSpace(part) == part && !strings.ContainsAny(part, " \t\r\n:@")
 }
 
 // ClearReplyReminders removes any queued reply-reminder nudges for the given
@@ -1862,13 +1915,20 @@ func (r *Router) isRecipientMuted(address string) bool {
 // addressToAgentBeadID converts a mail address to an agent bead ID for DND lookup.
 // Returns empty string if the address cannot be converted.
 func addressToAgentBeadID(address string) string {
-	switch {
-	case address == "overseer":
+	if address == "overseer" {
 		return "" // Overseer is a human, no agent bead
-	case strings.HasPrefix(address, constants.RoleMayor):
+	}
+	if dogName, ok := DogAddressName(address); ok {
+		return session.DogSessionName(dogName)
+	}
+	switch address {
+	case constants.RoleMayor, constants.RoleMayor + "/":
 		return session.MayorSessionName()
-	case strings.HasPrefix(address, constants.RoleDeacon):
+	case constants.RoleDeacon, constants.RoleDeacon + "/":
 		return session.DeaconSessionName()
+	}
+	if isReservedTownSubpath(address) {
+		return ""
 	}
 
 	parts := strings.SplitN(address, "/", 2)
@@ -1912,15 +1972,21 @@ func AddressToSessionIDs(address string) []string {
 	if address == "overseer" {
 		return []string{session.OverseerSessionName()}
 	}
+	if dogName, ok := DogAddressName(address); ok {
+		return []string{session.DogSessionName(dogName)}
+	}
 
 	// Mayor address: "mayor/" or "mayor"
-	if strings.HasPrefix(address, constants.RoleMayor) {
+	if address == constants.RoleMayor || address == constants.RoleMayor+"/" {
 		return []string{session.MayorSessionName()}
 	}
 
 	// Deacon address: "deacon/" or "deacon"
-	if strings.HasPrefix(address, constants.RoleDeacon) {
+	if address == constants.RoleDeacon || address == constants.RoleDeacon+"/" {
 		return []string{session.DeaconSessionName()}
+	}
+	if isReservedTownSubpath(address) {
+		return nil
 	}
 
 	// Rig-based address: "rig/target" or "rig/crew/name" or "rig/polecats/name"

@@ -583,7 +583,7 @@ The molecule stays in its current state (recoverable when the bug is fixed).
 Should not happen because the hook is exclusive (one `hook_bead` per agent bead,
 one agent bead per polecat name). But if it does:
 
-**Prevention:** Git branch naming includes a unique suffix (`@<timestamp>`).
+**Prevention:** Git branch naming includes a unique suffix (`+<timestamp>`).
 The TOCTOU guard in `DetectZombiePolecats()` (records `detectedAt`, re-verifies
 before destructive action) prevents racing between detection and action.
 

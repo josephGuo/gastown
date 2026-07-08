@@ -337,7 +337,7 @@ func runMoleculeStatus(cmd *cobra.Command, args []string) error {
 
 	if len(args) > 0 {
 		// Explicit target provided
-		target = args[0]
+		target = normalizeHookShowTarget(args[0])
 		callerCtx := detectRole(cwd, townRoot)
 		validationRole = callerCtx.Role
 	} else {
@@ -374,15 +374,7 @@ func runMoleculeStatus(cmd *cobra.Command, args []string) error {
 	// Resolve to the agent's rig beads directory if CWD-based discovery
 	// found the wrong database. This matches runHookShow's resolution logic.
 	if !isTownLevelRole(target) && townRoot != "" {
-		agentBeadID := buildAgentBeadID(target, roleCtx.Role, townRoot)
-		if agentBeadID != "" {
-			rigName := strings.Split(target, "/")[0]
-			fallbackPath := filepath.Join(townRoot, rigName)
-			resolvedDir := beads.ResolveHookDir(townRoot, agentBeadID, fallbackPath)
-			if resolvedDir != "" {
-				workDir = resolvedDir
-			}
-		}
+		workDir = resolveHookLookupWorkDir(workDir, target, townRoot)
 	}
 
 	b := beads.New(workDir)
@@ -412,27 +404,10 @@ func runMoleculeStatus(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		// Query for hooked beads using the authoritative source: bead status + assignee.
-		// First try status=hooked (work that's been slung but not yet claimed)
-		hookedBeads, err := b.List(beads.ListOptions{
-			Status:   beads.StatusHooked,
-			Assignee: target,
-			Priority: -1,
-		})
+		// Query for active work using the authoritative source: bead status + assignee.
+		hookedBeads, err := listAssignedActiveWork(b, target)
 		if err != nil {
 			return nil
-		}
-
-		// If no hooked beads found, also check in_progress beads assigned to this agent.
-		// This handles the case where work was claimed (status changed to in_progress)
-		// but the session was interrupted before completion. The hook should persist.
-		if len(hookedBeads) == 0 {
-			inProgressBeads, _ := b.List(beads.ListOptions{
-				Status:   "in_progress",
-				Assignee: target,
-				Priority: -1,
-			})
-			hookedBeads = inProgressBeads
 		}
 
 		// For town-level roles (mayor, deacon), scan all rigs if nothing found locally
@@ -446,18 +421,8 @@ func runMoleculeStatus(cmd *cobra.Command, args []string) error {
 		// See: https://github.com/steveyegge/gastown/issues/1438
 		if len(hookedBeads) == 0 && !isTownLevelRole(target) && townRoot != "" {
 			townB := beads.New(filepath.Join(townRoot, ".beads"))
-			if townHooked, err := townB.List(beads.ListOptions{
-				Status:   beads.StatusHooked,
-				Assignee: target,
-				Priority: -1,
-			}); err == nil && len(townHooked) > 0 {
-				hookedBeads = townHooked
-			} else if townInProgress, err := townB.List(beads.ListOptions{
-				Status:   "in_progress",
-				Assignee: target,
-				Priority: -1,
-			}); err == nil && len(townInProgress) > 0 {
-				hookedBeads = townInProgress
+			if townWork, err := listAssignedActiveWork(townB, target); err == nil && len(townWork) > 0 {
+				hookedBeads = townWork
 			}
 		}
 
@@ -1222,32 +1187,13 @@ func scanAllRigsForHookedBeads(townRoot, target string) []*beads.Issue {
 		}
 
 		b := beads.New(rigBeadsDir)
-		// First check for hooked beads
-		hookedBeads, err := b.List(beads.ListOptions{
-			Status:   beads.StatusHooked,
-			Assignee: target,
-			Priority: -1,
-		})
+		hookedBeads, err := listAssignedActiveWork(b, target)
 		if err != nil {
 			continue
 		}
 
 		if len(hookedBeads) > 0 {
 			return hookedBeads
-		}
-
-		// Also check for in_progress beads (work that was claimed but session interrupted)
-		inProgressBeads, err := b.List(beads.ListOptions{
-			Status:   "in_progress",
-			Assignee: target,
-			Priority: -1,
-		})
-		if err != nil {
-			continue
-		}
-
-		if len(inProgressBeads) > 0 {
-			return inProgressBeads
 		}
 	}
 

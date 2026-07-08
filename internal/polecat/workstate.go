@@ -150,12 +150,19 @@ func DecideWorkstate(in WorkstateInput) WorkstateDisposition {
 	}
 
 	if in.MQCheckRequired {
-		if !in.HasSubmittableWork || in.MQNotRequired {
-			d.MQStatus = "not_required"
-		} else if in.AssignedBeadTerminal || in.MRSubmitted {
-			d.MQStatus = "submitted"
-		} else if in.MQLookupFailed {
+		if in.MQLookupFailed {
+			d.Verdict = WorkstateVerdictNeedsRecovery
+			d.Reason = "mq-lookup-failed"
+			d.NeedsRecovery = true
 			d.MQStatus = "unknown"
+			d.CountsTowardCapacity = true
+			d.ReuseStatus = "idle-recovery-needed"
+			d.Blockers = append(d.Blockers, "mq_status=unknown")
+			return d
+		} else if !in.HasSubmittableWork || in.MQNotRequired {
+			d.MQStatus = "not_required"
+		} else if in.MRSubmitted {
+			d.MQStatus = "submitted"
 		} else {
 			d.Verdict = WorkstateVerdictNeedsMQSubmit
 			d.Reason = "mq-not-submitted"
