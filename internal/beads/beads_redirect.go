@@ -2,9 +2,11 @@
 package beads
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -108,12 +110,26 @@ func resolveBeadsDirWithDepth(beadsDir string, maxDepth int) string {
 	return resolveBeadsDirWithDepth(resolved, maxDepth-1)
 }
 
-// cleanBeadsRuntimeFiles removes gitignored runtime files from a .beads directory
-// while preserving tracked files (formulas/, README.md, config.yaml, .gitignore).
+// cleanBeadsRuntimeFiles removes redirect-local runtime and identity files from a
+// .beads directory while preserving tracked docs/formula surfaces (formulas/,
+// README.md, .gitignore). Identity files next to a redirect can make bd bind to
+// the wrong database, so tracked identity files are hidden before removal.
 // This is safe to call even if the directory doesn't exist.
 func cleanBeadsRuntimeFiles(beadsDir string) error {
-	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
+	info, err := os.Lstat(beadsDir)
+	if os.IsNotExist(err) {
 		return nil // Nothing to clean
+	} else if err != nil {
+		return err
+	} else if !info.IsDir() {
+		return nil
+	}
+
+	worktreePath := filepath.Dir(beadsDir)
+	for _, name := range []string{"metadata.json", "config.yaml"} {
+		if err := removeWorktreeIdentityFile(worktreePath, filepath.Join(beadsDir, name)); err != nil {
+			return err
+		}
 	}
 
 	// Runtime files/patterns that are gitignored and safe to remove
@@ -147,6 +163,63 @@ func cleanBeadsRuntimeFiles(beadsDir string) error {
 	}
 
 	return firstErr
+}
+
+func removeWorktreeIdentityFile(worktreePath, path string) error {
+	if _, err := os.Lstat(path); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("checking %s: %w", path, err)
+	}
+
+	rel, err := filepath.Rel(worktreePath, path)
+	if err != nil {
+		return fmt.Errorf("computing git path for %s: %w", path, err)
+	}
+	if rel == "." || rel == "" || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("refusing to clean identity file outside worktree: %s", path)
+	}
+	rel = filepath.ToSlash(rel)
+
+	tracked, err := gitPathTracked(worktreePath, rel)
+	if err != nil {
+		return err
+	}
+	if tracked {
+		if err := markGitPathSkipWorktree(worktreePath, rel); err != nil {
+			return err
+		}
+	}
+
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("removing %s: %w", path, err)
+	}
+	return nil
+}
+
+func gitPathTracked(worktreePath, relPath string) (bool, error) {
+	cmd := exec.Command("git", "-C", worktreePath, "ls-files", "--stage", "--", relPath) //nolint:gosec // argv is fixed; relPath is passed after --.
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("git ls-files %s: %w%s", relPath, err, gitOutputSuffix(out))
+	}
+	return len(bytes.TrimSpace(out)) > 0, nil
+}
+
+func markGitPathSkipWorktree(worktreePath, relPath string) error {
+	cmd := exec.Command("git", "-C", worktreePath, "update-index", "--skip-worktree", "--", relPath) //nolint:gosec // argv is fixed; relPath is passed after --.
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git update-index --skip-worktree %s: %w%s", relPath, err, gitOutputSuffix(out))
+	}
+	return nil
+}
+
+func gitOutputSuffix(out []byte) string {
+	trimmed := strings.TrimSpace(string(out))
+	if trimmed == "" {
+		return ""
+	}
+	return ": " + trimmed
 }
 
 // ComputeRedirectTarget computes the expected redirect target for a worktree.
@@ -349,13 +422,13 @@ func SetupRedirect(townRoot, worktreePath string) error {
 		}
 	}
 
-	// Clean up runtime files in .beads/ but preserve tracked files (formulas/, README.md, etc.)
+	// Clean up runtime/identity files in .beads/ but preserve tracked docs (formulas/, README.md, etc.)
 	worktreeBeadsDir := filepath.Join(worktreePath, ".beads")
 
-	// Handle edge case: if .beads exists as a file (not directory), remove it.
+	// Handle edge cases: if .beads exists as a file or symlink, remove that path.
 	// This can happen with stale state from previous failed operations or
 	// unusual clone state. MkdirAll would fail with "file exists" in this case.
-	if info, err := os.Stat(worktreeBeadsDir); err == nil && !info.IsDir() {
+	if info, err := os.Lstat(worktreeBeadsDir); err == nil && !info.IsDir() {
 		if err := os.Remove(worktreeBeadsDir); err != nil {
 			return fmt.Errorf("removing stale .beads file: %w", err)
 		}

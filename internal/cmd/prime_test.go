@@ -1168,6 +1168,72 @@ func TestEnsureBeadsRedirect_RepairsExistingRedirectChain(t *testing.T) {
 	}
 }
 
+func TestEnsureBeadsRedirect_CleansIdentityFilesWhenRedirectAlreadyCorrect(t *testing.T) {
+	runGit := func(t *testing.T, dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+
+	townRoot := t.TempDir()
+	rigRoot := filepath.Join(townRoot, "testrig")
+	rigBeadsDir := filepath.Join(rigRoot, ".beads")
+	mayorBeadsDir := filepath.Join(rigRoot, "mayor", "rig", ".beads")
+	workDir := filepath.Join(rigRoot, "polecats", "worker1", "gastown")
+	workBeadsDir := filepath.Join(workDir, ".beads")
+
+	if err := os.MkdirAll(mayorBeadsDir, 0755); err != nil {
+		t.Fatalf("mkdir mayor beads dir: %v", err)
+	}
+	if err := os.MkdirAll(rigBeadsDir, 0755); err != nil {
+		t.Fatalf("mkdir rig beads dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rigBeadsDir, "redirect"), []byte("mayor/rig/.beads\n"), 0644); err != nil {
+		t.Fatalf("write rig redirect: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rigBeadsDir, "metadata.json"), []byte(`{"dolt_database":"hq","backend":"dolt"}`), 0644); err != nil {
+		t.Fatalf("write rig metadata: %v", err)
+	}
+	if err := os.MkdirAll(workBeadsDir, 0755); err != nil {
+		t.Fatalf("mkdir work beads dir: %v", err)
+	}
+	runGit(t, workDir, "init")
+
+	redirectPath := filepath.Join(workBeadsDir, "redirect")
+	if err := os.WriteFile(redirectPath, []byte("../../../mayor/rig/.beads\n"), 0644); err != nil {
+		t.Fatalf("write redirect: %v", err)
+	}
+	for _, file := range []string{"metadata.json", "config.yaml"} {
+		if err := os.WriteFile(filepath.Join(workBeadsDir, file), []byte("stale identity"), 0644); err != nil {
+			t.Fatalf("write %s: %v", file, err)
+		}
+	}
+
+	ctx := RoleContext{
+		Role:     RolePolecat,
+		WorkDir:  workDir,
+		TownRoot: townRoot,
+	}
+
+	ensureBeadsRedirect(ctx)
+
+	content, err := os.ReadFile(redirectPath)
+	if err != nil {
+		t.Fatalf("read redirect: %v", err)
+	}
+	if got, want := string(content), "../../../mayor/rig/.beads\n"; got != want {
+		t.Fatalf("redirect content = %q, want %q", got, want)
+	}
+	for _, file := range []string{"metadata.json", "config.yaml"} {
+		if _, err := os.Stat(filepath.Join(workBeadsDir, file)); !os.IsNotExist(err) {
+			t.Fatalf("%s should have been cleaned, stat err=%v", file, err)
+		}
+	}
+}
+
 func TestOutputRalphLoopDirective_PluginInstalled(t *testing.T) {
 	attachment := &beads.AttachmentFields{
 		Mode:            "ralph",
