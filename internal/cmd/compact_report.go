@@ -69,6 +69,8 @@ var wispCategoryMap = map[string]string{
 // categoryOrder is the display order for categories in reports.
 var categoryOrder = []string{"Heartbeats", "Patrols", "Errors", "Untyped"}
 
+const zeroPatrolReportingGap = "0 eligible patrol wisps in the report query/window (patrol health not assessed)"
+
 // categoryStats tracks per-category compaction statistics.
 type categoryStats struct {
 	Deleted  int `json:"deleted"`
@@ -171,7 +173,7 @@ func runDailyDigest() error {
 		return fmt.Errorf("getting working dir: %w", err)
 	}
 	bd := beads.New(workDir)
-	activeWisps, err := listWisps(bd)
+	activeWisps, err := listReportWisps(bd)
 	if err != nil {
 		return fmt.Errorf("listing active wisps: %w", err)
 	}
@@ -214,6 +216,29 @@ func runDailyDigest() error {
 	}
 
 	return nil
+}
+
+// listReportWisps includes infrastructure wisps that the default bd list view
+// hides. This is intentionally separate from listWisps, whose result drives
+// mutating compaction decisions and must retain its existing scope.
+func listReportWisps(bd *beads.Beads) ([]*compactIssue, error) {
+	out, err := bd.Run("list", "--include-infra", "--json", "--all", "-n", "0")
+	if err != nil {
+		return nil, err
+	}
+
+	var allIssues []*compactIssue
+	if err := json.Unmarshal(extractJSONArray(out), &allIssues); err != nil {
+		return nil, fmt.Errorf("parsing report issue list: %w", err)
+	}
+
+	var wisps []*compactIssue
+	for _, issue := range allIssues {
+		if issue.Ephemeral {
+			wisps = append(wisps, issue)
+		}
+	}
+	return wisps, nil
 }
 
 // buildReport aggregates compaction results by category.
@@ -276,9 +301,9 @@ func detectAnomalies(report *compactReport) []string {
 				stats.Deleted/300)) // ~300/day is baseline for a rig
 		}
 
-		// Zero patrols is suspicious (witness may be down)
+		// A zero query result is a reporting observation, not agent-health proof.
 		if cat == "Patrols" && stats.Active == 0 && stats.Deleted == 0 && stats.Promoted == 0 {
-			anomalies = append(anomalies, "0 patrol wisps (patrol agents may be down)")
+			anomalies = append(anomalies, zeroPatrolReportingGap)
 		}
 
 		// High promotion rate (> 50% of non-skipped suggests miscategorized wisps)
@@ -445,7 +470,9 @@ func runWeeklyRollup() error {
 			rollup.Totals[cat].Active = stats.Active // Use latest active count
 		}
 		rollup.Promotions += len(report.Promotions)
-		rollup.Anomalies = append(rollup.Anomalies, report.Anomalies...)
+		for _, anomaly := range report.Anomalies {
+			rollup.Anomalies = append(rollup.Anomalies, normalizeCompactionAnomaly(anomaly))
+		}
 	}
 
 	if compactReportJSON {
@@ -494,6 +521,7 @@ func runWeeklyRollup() error {
 func queryCompactionReports(startDate, endDate string) ([]*compactReport, error) {
 	listCmd := exec.Command("bd", "list",
 		"--type=event",
+		"--status=all",
 		"--json",
 		"--limit=0",
 	)
@@ -503,15 +531,19 @@ func queryCompactionReports(startDate, endDate string) ([]*compactReport, error)
 	}
 
 	var events []struct {
-		ID           string `json:"id"`
-		Title        string `json:"title"`
-		EventPayload string `json:"event_payload"`
+		ID        string `json:"id"`
+		Title     string `json:"title"`
+		Payload   string `json:"payload"`
+		CreatedAt string `json:"created_at"`
 	}
 	if err := json.Unmarshal(extractJSONArray(listOutput), &events); err != nil {
 		return nil, fmt.Errorf("parsing event list: %w", err)
 	}
 
 	var reports []*compactReport
+	reportIndexByDate := make(map[string]int)
+	reportCreatedAtByDate := make(map[string]string)
+	matchingEvents := 0
 	for _, evt := range events {
 		if !strings.HasPrefix(evt.Title, "Compaction Report ") {
 			continue
@@ -521,16 +553,31 @@ func queryCompactionReports(startDate, endDate string) ([]*compactReport, error)
 		if evtDate < startDate || evtDate > endDate {
 			continue
 		}
+		matchingEvents++
 
 		// Parse the event payload back into a compactReport
-		if evt.EventPayload == "" {
+		if evt.Payload == "" {
 			continue
 		}
 		var report compactReport
-		if err := json.Unmarshal([]byte(evt.EventPayload), &report); err != nil {
+		if err := json.Unmarshal([]byte(evt.Payload), &report); err != nil {
 			continue
 		}
+		if idx, exists := reportIndexByDate[report.Date]; exists {
+			// A failed historical idempotency check can leave duplicate daily
+			// audit beads. Count each calendar day once and keep the newest copy.
+			if evt.CreatedAt > reportCreatedAtByDate[report.Date] {
+				reports[idx] = &report
+				reportCreatedAtByDate[report.Date] = evt.CreatedAt
+			}
+			continue
+		}
+		reportIndexByDate[report.Date] = len(reports)
+		reportCreatedAtByDate[report.Date] = evt.CreatedAt
 		reports = append(reports, &report)
+	}
+	if matchingEvents > 0 && len(reports) == 0 {
+		return nil, fmt.Errorf("found %d matching compaction report event(s), but no usable payload", matchingEvents)
 	}
 
 	// Sort by date
@@ -541,12 +588,23 @@ func queryCompactionReports(startDate, endDate string) ([]*compactReport, error)
 	return reports, nil
 }
 
+func normalizeCompactionAnomaly(anomaly string) string {
+	if anomaly == "0 patrol wisps (patrol agents may be down)" {
+		return zeroPatrolReportingGap
+	}
+	return anomaly
+}
+
 // formatWeeklyRollup renders the markdown weekly rollup.
 func formatWeeklyRollup(rollup *weeklyRollup) string {
 	var sb strings.Builder
 
 	sb.WriteString(fmt.Sprintf("## Weekly Wisp Compaction: %s to %s\n\n", rollup.WeekStart, rollup.WeekEnd))
 	sb.WriteString(fmt.Sprintf("**Days reported:** %d\n\n", rollup.Days))
+	if rollup.Days == 0 {
+		sb.WriteString("### Coverage\n")
+		sb.WriteString("- No eligible daily compaction reports were found in this date range; patrol health was not assessed.\n\n")
+	}
 
 	// Totals table
 	sb.WriteString("### Totals\n")

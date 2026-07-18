@@ -109,6 +109,154 @@ func TestBuildReport(t *testing.T) {
 	}
 }
 
+func TestListReportWispsIncludesInfrastructure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script command stubs not supported on Windows")
+	}
+
+	binDir := t.TempDir()
+	argsLog := filepath.Join(t.TempDir(), "bd-args.log")
+	bdScript := `#!/bin/sh
+printf '%s\n' "$*" >> "$BD_ARGS_LOG"
+case "$*" in
+  *list*)
+    printf '[{"id":"hq-wisp-patrol","title":"mol-deacon-patrol","status":"hooked","issue_type":"molecule","ephemeral":true,"wisp_type":"patrol"}]\n'
+    ;;
+  *)
+    printf 'bd test stub\n'
+    ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(bdScript), 0755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_ARGS_LOG", argsLog)
+	beads.ResetBdAllowStaleCacheForTest()
+	t.Cleanup(beads.ResetBdAllowStaleCacheForTest)
+
+	wisps, err := listReportWisps(beads.New(t.TempDir()))
+	if err != nil {
+		t.Fatalf("listReportWisps: %v", err)
+	}
+	if len(wisps) != 1 || wisps[0].ID != "hq-wisp-patrol" {
+		t.Fatalf("wisps = %#v, want patrol infrastructure wisp", wisps)
+	}
+
+	args, err := os.ReadFile(argsLog)
+	if err != nil {
+		t.Fatalf("read bd args: %v", err)
+	}
+	if !strings.Contains(string(args), "--include-infra") {
+		t.Fatalf("bd args = %q, want --include-infra", string(args))
+	}
+}
+
+func TestQueryCompactionReportsReadsPayloadField(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script command stubs not supported on Windows")
+	}
+
+	binDir := t.TempDir()
+	bdScript := `#!/bin/sh
+printf '%s\n' '[{"id":"hq-report","title":"Compaction Report 2026-07-12","payload":"{\"date\":\"2026-07-12\",\"categories\":{\"Patrols\":{\"active\":2}}}"}]'
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(bdScript), 0755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	reports, err := queryCompactionReports("2026-07-05", "2026-07-12")
+	if err != nil {
+		t.Fatalf("queryCompactionReports: %v", err)
+	}
+	if len(reports) != 1 {
+		t.Fatalf("len(reports) = %d, want 1", len(reports))
+	}
+	if got := reports[0].Categories["Patrols"].Active; got != 2 {
+		t.Fatalf("Patrols.Active = %d, want 2", got)
+	}
+}
+
+func TestQueryCompactionReportsIncludesClosedEvents(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script command stubs not supported on Windows")
+	}
+
+	binDir := t.TempDir()
+	argsLog := filepath.Join(t.TempDir(), "bd-args.log")
+	bdScript := `#!/bin/sh
+printf '%s\n' "$*" > "$BD_ARGS_LOG"
+printf '%s\n' '[{"id":"hq-report","title":"Compaction Report 2026-07-12","payload":"{\"date\":\"2026-07-12\",\"categories\":{}}"}]'
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(bdScript), 0755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BD_ARGS_LOG", argsLog)
+
+	reports, err := queryCompactionReports("2026-07-05", "2026-07-12")
+	if err != nil {
+		t.Fatalf("queryCompactionReports: %v", err)
+	}
+	if len(reports) != 1 {
+		t.Fatalf("len(reports) = %d, want 1 closed event", len(reports))
+	}
+	args, err := os.ReadFile(argsLog)
+	if err != nil {
+		t.Fatalf("read bd args: %v", err)
+	}
+	if !strings.Contains(string(args), "--status=all") {
+		t.Fatalf("bd args = %q, want --status=all", string(args))
+	}
+}
+
+func TestQueryCompactionReportsDeduplicatesReportDates(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script command stubs not supported on Windows")
+	}
+
+	binDir := t.TempDir()
+	bdScript := `#!/bin/sh
+printf '%s\n' '[{"id":"hq-old","title":"Compaction Report 2026-07-08","created_at":"2026-07-08T00:00:00Z","payload":"{\"date\":\"2026-07-08\",\"categories\":{\"Patrols\":{\"active\":1}}}"},{"id":"hq-new","title":"Compaction Report 2026-07-08","created_at":"2026-07-08T01:00:00Z","payload":"{\"date\":\"2026-07-08\",\"categories\":{\"Patrols\":{\"active\":2}}}"}]'
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(bdScript), 0755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	reports, err := queryCompactionReports("2026-07-05", "2026-07-12")
+	if err != nil {
+		t.Fatalf("queryCompactionReports: %v", err)
+	}
+	if len(reports) != 1 {
+		t.Fatalf("len(reports) = %d, want 1 unique report date", len(reports))
+	}
+	if got := reports[0].Categories["Patrols"].Active; got != 2 {
+		t.Fatalf("Patrols.Active = %d, want first/latest report value 2", got)
+	}
+}
+
+func TestQueryCompactionReportsRejectsMatchingEventsWithoutUsablePayload(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script command stubs not supported on Windows")
+	}
+
+	binDir := t.TempDir()
+	bdScript := `#!/bin/sh
+printf '%s\n' '[{"id":"hq-report","title":"Compaction Report 2026-07-12","payload":"not-json"}]'
+`
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(bdScript), 0755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := queryCompactionReports("2026-07-05", "2026-07-12")
+	if err == nil || !strings.Contains(err.Error(), "no usable payload") {
+		t.Fatalf("error = %v, want no usable payload diagnostic", err)
+	}
+}
+
 func TestDetectAnomalies(t *testing.T) {
 	t.Run("high heartbeat volume", func(t *testing.T) {
 		report := &compactReport{
@@ -143,12 +291,17 @@ func TestDetectAnomalies(t *testing.T) {
 		anomalies := detectAnomalies(report)
 		found := false
 		for _, a := range anomalies {
-			if strings.Contains(a, "0 patrol wisps") {
+			if strings.Contains(a, "0 eligible patrol wisps") {
 				found = true
 			}
 		}
 		if !found {
 			t.Error("expected zero patrol anomaly, got none")
+		}
+		for _, a := range anomalies {
+			if strings.Contains(a, "patrol agents may be down") {
+				t.Fatalf("reporting gap must not claim agent health: %q", a)
+			}
 		}
 	})
 
@@ -289,6 +442,34 @@ func TestFormatWeeklyRollup(t *testing.T) {
 	}
 	if !strings.Contains(md, "### Anomalies This Week") {
 		t.Error("missing anomalies section")
+	}
+}
+
+func TestFormatWeeklyRollupExplainsZeroDayCoverage(t *testing.T) {
+	rollup := &weeklyRollup{
+		WeekStart: "2026-07-05",
+		WeekEnd:   "2026-07-12",
+		Totals: map[string]*categoryStats{
+			"Heartbeats": {},
+			"Patrols":    {},
+			"Errors":     {},
+			"Untyped":    {},
+		},
+	}
+
+	md := formatWeeklyRollup(rollup)
+	if !strings.Contains(md, "No eligible daily compaction reports") {
+		t.Fatalf("zero-day rollup lacks coverage explanation:\n%s", md)
+	}
+}
+
+func TestNormalizeCompactionAnomalyRemovesUnsupportedHealthClaim(t *testing.T) {
+	got := normalizeCompactionAnomaly("0 patrol wisps (patrol agents may be down)")
+	if strings.Contains(got, "agents may be down") {
+		t.Fatalf("normalized anomaly still claims agent health: %q", got)
+	}
+	if !strings.Contains(got, "patrol health not assessed") {
+		t.Fatalf("normalized anomaly = %q, want reporting-scope explanation", got)
 	}
 }
 
