@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestNewDoltServerManagerNormalizesManagedEndpointFromTownConfig(t *testing.T) {
@@ -121,6 +123,32 @@ func TestApplyConfiguredDoltHostEnvClearsManagedConfigWithoutHost(t *testing.T) 
 	}
 }
 
+func TestWriteDaemonDoltConfigAutoGC(t *testing.T) {
+	t.Run("default enabled", func(t *testing.T) {
+		unsetEnv(t, "GT_DOLT_AUTO_GC")
+
+		got := writeAndReadDaemonAutoGC(t)
+		if !got.Enable {
+			t.Fatalf("auto_gc_behavior.enable = false, want true")
+		}
+		if got.ArchiveLevel != 1 {
+			t.Fatalf("auto_gc_behavior.archive_level = %d, want 1", got.ArchiveLevel)
+		}
+	})
+
+	t.Run("kill switch disabled", func(t *testing.T) {
+		t.Setenv("GT_DOLT_AUTO_GC", "disabled")
+
+		got := writeAndReadDaemonAutoGC(t)
+		if got.Enable {
+			t.Fatalf("GT_DOLT_AUTO_GC=disabled: auto_gc_behavior.enable = true, want false")
+		}
+		if got.ArchiveLevel != 0 {
+			t.Fatalf("GT_DOLT_AUTO_GC=disabled: auto_gc_behavior.archive_level = %d, want 0", got.ArchiveLevel)
+		}
+	})
+}
+
 func writeManagedDoltConfig(t *testing.T, townRoot, content string) {
 	t.Helper()
 	doltDataDir := filepath.Join(townRoot, ".dolt-data")
@@ -130,6 +158,53 @@ func writeManagedDoltConfig(t *testing.T, townRoot, content string) {
 	if err := os.WriteFile(filepath.Join(doltDataDir, "config.yaml"), []byte(content), 0644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func writeAndReadDaemonAutoGC(t *testing.T) struct {
+	Enable       bool `yaml:"enable"`
+	ArchiveLevel int  `yaml:"archive_level"`
+} {
+	t.Helper()
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	cfg := &DoltServerConfig{Port: 3307, DataDir: dir}
+	if err := writeDaemonDoltConfig(cfg, configPath); err != nil {
+		t.Fatalf("writeDaemonDoltConfig: %v", err)
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("reading daemon Dolt config: %v", err)
+	}
+
+	var parsed struct {
+		Behavior struct {
+			AutoGCBehavior struct {
+				Enable       bool `yaml:"enable"`
+				ArchiveLevel int  `yaml:"archive_level"`
+			} `yaml:"auto_gc_behavior"`
+		} `yaml:"behavior"`
+	}
+	if err := yaml.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("generated daemon config is invalid YAML: %v\n%s", err, data)
+	}
+	return parsed.Behavior.AutoGCBehavior
+}
+
+func unsetEnv(t *testing.T, key string) {
+	t.Helper()
+
+	old, hadOld := os.LookupEnv(key)
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatalf("unset %s: %v", key, err)
+	}
+	t.Cleanup(func() {
+		if hadOld {
+			_ = os.Setenv(key, old)
+		} else {
+			_ = os.Unsetenv(key)
+		}
+	})
 }
 
 func assertProcessEnv(t *testing.T, key, want string) {

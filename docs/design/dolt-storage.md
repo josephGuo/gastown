@@ -239,9 +239,9 @@ but insufficient. DELETE + rebase + gc is the full pipeline.
 
 **Critical update** (Tim Sehn, 2026-02-28): All compaction operations —
 `DOLT_RESET --soft`, `DOLT_REBASE()`, `dolt_gc()` — are **safe on a
-running server**. No downtime or maintenance window is needed. Auto-GC
-has been ON by default since Dolt 1.75.0. Flatten is trivially cheap
-(pointer moves, not data writes). Can run daily or more frequently.
+running server**. Routine compaction does not need downtime. Auto-GC has
+been ON by default since Dolt 1.75.0. Flatten is trivially cheap (pointer
+moves, not data writes). Can run daily or more frequently.
 
 Reference: https://www.dolthub.com/blog/2026-01-28-everybody-rebase/
 
@@ -393,6 +393,19 @@ first, gc second.
 **Automatic GC is ON by default** since Dolt 1.75.0 (October 2025). It
 triggers when the journal file (`.dolt/noms/vvvv...`) reaches 50MB. No
 manual gc or server stop is required — the server handles it.
+
+Gas Town managed Dolt configs should keep `auto_gc_behavior` enabled with
+`archive_level: 1` so the sql-server does not retain every old chunk index
+and grow RSS indefinitely. The config is regenerated only when the managed
+Dolt server starts; a deployed change takes effect on the next Dolt restart.
+Set `GT_DOLT_AUTO_GC=off` before that restart to emit `enable: false` and
+`archive_level: 0` as an operational rollback switch.
+
+If auto-GC was disabled long enough for a database to bloat, schedule one
+explicit `dolt gc --full --archive-level=1` in a maintenance window to reset
+the storage/RSS baseline. That one-time reclaim is an operator action, not a
+hidden daemon task; after it completes, auto-GC handles ongoing chunk
+reclamation.
 
 ```sql
 -- Manual gc (safe on a running server, no need to stop)
