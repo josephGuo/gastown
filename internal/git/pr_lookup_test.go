@@ -36,6 +36,25 @@ exit 1
 	}
 }
 
+func TestLookupPullRequestRecordedURLRejectsHeadDrift(t *testing.T) {
+	installFakeGH(t, `#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "https://github.com/upstream/repo/pull/42" ]; then
+  printf '%s\n' '{"number":42,"url":"https://github.com/upstream/repo/pull/42","state":"OPEN","mergedAt":"","headRefName":"fix/drift","headRefOid":"new-head","headRepository":{"nameWithOwner":"fork/repo"},"headRepositoryOwner":{"login":"fork"},"baseRepository":{"nameWithOwner":"upstream/repo"}}'
+  exit 0
+fi
+printf 'unexpected gh args: %s\n' "$*" >&2
+exit 1
+`)
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+	addGitHubRemotes(t, g)
+
+	_, err := g.LookupPullRequest(PullRequestRef{URL: "https://github.com/upstream/repo/pull/42", Branch: "fix/drift", HeadSHA: "submitted"})
+	if err == nil || !strings.Contains(err.Error(), "head changed") {
+		t.Fatalf("LookupPullRequest err = %v, want head changed", err)
+	}
+}
+
 func TestLookupPullRequestQualifiedForkHead(t *testing.T) {
 	installFakeGH(t, `#!/bin/sh
 if [ "$1" = "api" ] && [ "$2" = "-X" ] && [ "$3" = "GET" ] && [ "$4" = "repos/upstream/repo/pulls" ]; then
@@ -144,7 +163,7 @@ exit 1
 `)
 	dir := initTestRepo(t)
 	g := NewGit(dir)
-	pr := &PullRequestInfo{Number: 42, URL: "https://github.com/upstream/repo/pull/42", BaseRepo: "upstream/repo"}
+	pr := &PullRequestInfo{Number: 42, URL: "https://github.com/upstream/repo/pull/42", BaseRepo: "upstream/repo", HeadSHA: "abc123"}
 
 	approved, err := g.IsPullRequestApproved(pr)
 	if err != nil {
@@ -164,7 +183,7 @@ exit 1
 	log := string(logBytes)
 	for _, want := range []string{
 		"pr view https://github.com/upstream/repo/pull/42 --json reviewDecision --repo upstream/repo",
-		"pr merge https://github.com/upstream/repo/pull/42 --squash --delete-branch --repo upstream/repo",
+		"pr merge https://github.com/upstream/repo/pull/42 --squash --match-head-commit abc123 --repo upstream/repo",
 	} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("gh log missing %q\nlog:\n%s", want, log)

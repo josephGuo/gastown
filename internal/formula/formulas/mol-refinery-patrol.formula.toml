@@ -1,7 +1,7 @@
 description = """
 Merge queue processor patrol loop.
 
-The Refinery is the Engineer in the engine room. You process polecat branches, merging them to their effective target branches one at a time with sequential rebasing.
+The Refinery is the Engineer in the engine room. You process polecat branches, merging them to their effective target branches one at a time without rewriting submitted heads.
 
 **The Scotty Test**: Before proceeding past any failure, ask yourself: "Would Scotty walk past a warp core leak because it existed before his shift?"
 
@@ -16,7 +16,7 @@ Witness                    Refinery                      Git        Polecat
    │─────────────────────────>│                           │            │
    │                          │                           │            │
    │                    (verify branch)                   │            │
-   │                          │ fetch & rebase            │            │
+   │                          │ fetch & merge rehearsal    │            │
    │                          │──────────────────────────>│            │
    │                          │                           │            │
    │                    (run tests)                       │            │
@@ -66,12 +66,12 @@ source of truth.
 | delete_merged_branches | true | Whether to delete source branches after merge |
 | judgment_enabled | false | Enable quality review for merges (true/false) |
 | review_depth | standard | Review depth: quick, standard, or deep |
-| merge_strategy | direct | Merge strategy: 'direct' (ff-only merge+push) or 'pr' (GitHub PR) |
+| merge_strategy | direct | Merge strategy: 'direct' (merge+push) or 'pr' (GitHub PR) |
 | require_review | false | Require at least one approving GitHub review before merging (pr mode only) |
 
 ## Target Resolution Rule
 
-When instructions reference `<rebase-target>`, `<merge-target>`, or `<verification-target>`,
+When instructions reference `<merge-target>` or `<verification-target>`,
 resolve that placeholder with this rule:
 
 - If integration_branch_refinery_enabled = "true": use MR target when present, otherwise {{target_branch}}.
@@ -308,13 +308,13 @@ branch-only `gh pr list --limit 1`, retries, or broad fallback searches.
 
 For each queued MR:
 - If lookup errors or reports ambiguity: leave the MR open and continue to the next MR.
-- If `PR_STATE=MERGED`: send MERGED to Witness, then run post-merge cleanup with branch deletion skipped:
+- If `PR_STATE=MERGED`: run post-merge cleanup with branch deletion skipped, then send MERGED to Witness:
   ```bash
+  gt mq post-merge <rig> <mr-id> --skip-branch-delete
   gt mail send <rig>/witness -s "MERGED <polecat-name>" -m "Branch: <branch>
   Issue: <issue-id>
   PR: ${PR_URL}
   MR: <mr-id>"
-  gt mq post-merge <rig> <mr-id> --skip-branch-delete
   gt mail archive <merge-ready-message-id>
   ```
 - If `PR_STATE=OPEN`: leave it for the normal process-branch/merge-push path.
@@ -325,17 +325,17 @@ After sweeping merged PRs, process only MRs still actionable in process-branch."
 
 [[steps]]
 id = "process-branch"
-title = "Mechanical rebase"
+title = "Merge rehearsal"
 needs = ["merged-pr-sweep"]
 description = """
-Pick next branch from queue. Attempt mechanical rebase on the MR's effective target branch.
+Pick next branch from queue. Rehearse an ancestry-preserving merge against the MR's effective target branch.
 
 **Config: integration_branch_refinery_enabled = {{integration_branch_refinery_enabled}}**
 **Config: target_branch = {{target_branch}}**
 
-**Step 0: Determine rebase target (must match merge target)**
+**Step 0: Determine merge target**
 
-Resolve `<rebase-target>` using the **Target Resolution Rule** above.
+Resolve `<merge-target>` using the **Target Resolution Rule** above.
 Do NOT hardcode `main` unless `main` is actually the resolved MR target.
 
 **Step 0.5: Verify branch still exists (race-condition guard)**
@@ -351,40 +351,40 @@ If the branch no longer exists (exit code non-zero):
 - If `PR_STATE=MERGED`: return to merged-pr-sweep behavior for this MR.
 - If lookup errors, ambiguity, `OPEN`, `CLOSED`, or `NOT_FOUND`: leave the MR open and skip to loop-check; do NOT close it as missing, do NOT nudge the polecat.
 
-**Step 1: Checkout and attempt rebase**
+**Step 1: Checkout and rehearse merge without rewriting the submitted head**
 ```bash
 git checkout -b temp origin/<polecat-branch>
-git rebase origin/<rebase-target>
+git merge --no-ff --no-edit origin/<merge-target>
 ```
 
-**Step 2: Check rebase result**
+**Step 2: Check merge rehearsal result**
 
-The rebase exits with:
+The merge exits with:
 - Exit code 0: Success - proceed to run-tests
 - Exit code 1 (conflicts): Conflict detected - proceed to Step 3
 
-To detect conflict state after rebase fails:
+To detect conflict state after merge fails:
 ```bash
-# Check if we're in a conflicted rebase state
-ls .git/rebase-merge 2>/dev/null && echo "CONFLICT_STATE"
+# Check if we're in a conflicted merge state
+test -f .git/MERGE_HEAD && echo "CONFLICT_STATE"
 ```
 
 **Step 3: Handle conflicts (if any)**
 
-If rebase SUCCEEDED (exit code 0):
+If merge rehearsal SUCCEEDED (exit code 0):
 - Skip to run-tests step (continue normal merge flow)
 
-If rebase FAILED with conflicts:
+If merge rehearsal FAILED with conflicts:
 
-1. **Abort the rebase** (DO NOT leave repo in conflicted state):
+1. **Abort the merge** (DO NOT leave repo in conflicted state):
 ```bash
-git rebase --abort
+git merge --abort
 ```
 
 2. **Record conflict metadata**:
 ```bash
 # Capture target SHA for reference
-TARGET_SHA=$(git rev-parse origin/<rebase-target>)
+TARGET_SHA=$(git rev-parse origin/<merge-target>)
 BRANCH_SHA=$(git rev-parse origin/<polecat-branch>)
 ```
 
@@ -397,14 +397,14 @@ bd create --type=task --priority=1 \
 Original MR: <mr-bead-id>
 Branch: <polecat-branch>
 Original Issue: <issue-id>
-Conflict with target <rebase-target> at: ${TARGET_SHA}
+Conflict with target <merge-target> at: ${TARGET_SHA}
 Branch SHA: ${BRANCH_SHA}
 
 ## Instructions
 1. Clone/checkout the branch
-2. Rebase on target: git rebase origin/<rebase-target>
+2. Merge target without rewriting branch history: git merge --no-ff origin/<merge-target>
 3. Resolve conflicts
-4. Force push: git push -f origin <branch>
+4. Push: git push origin <branch>
 5. Close this task when done
 
 The MR will be re-queued for processing after conflicts are resolved."
@@ -418,7 +418,7 @@ The MR will be re-queued for processing after conflicts are resolved."
 **CRITICAL**: Never delete a branch that has conflicts. The branch contains
 the original work and must be preserved for conflict resolution.
 
-Track: rebase result (success/conflict), conflict task ID if created."""
+Track: merge rehearsal result (success/conflict), conflict task ID if created."""
 
 [[steps]]
 id = "run-tests"
@@ -611,7 +611,8 @@ id = "merge-push"
 title = "Merge and push"
 needs = ["handle-failures"]
 description = """
-Merge and push. CRITICAL: Notifications come IMMEDIATELY after push.
+Merge and push. CRITICAL: verified post-merge cleanup comes immediately after push;
+send MERGED only after `gt mq post-merge` succeeds.
 
 **Config: integration_branch_refinery_enabled = {{integration_branch_refinery_enabled}}**
 **Config: target_branch = {{target_branch}}**
@@ -627,7 +628,7 @@ Determine `<merge-target>` using the **Target Resolution Rule** above.
 
 ```bash
 git checkout <merge-target>
-git merge --ff-only temp
+git merge --no-ff -m "Merge <polecat-branch> into <merge-target>" origin/<polecat-branch>
 git push origin <merge-target>
 ```
 
@@ -678,13 +679,11 @@ Continue to Step 2.
 
 **If merge_strategy = "pr":**
 
-Push the rebased branch and create a GitHub PR instead of direct merge.
+Create a GitHub PR for the submitted branch instead of direct merge. Do not
+force-push or rebase the polecat branch; post-merge proof depends on the
+submitted head remaining stable.
 
 ```bash
-# Push the rebased polecat branch (force-push since we rebased)
-git checkout temp
-git push origin temp:refs/heads/<polecat-branch> --force-with-lease
-
 # Create the PR using bead metadata for title/description
 PR_URL=$(gh pr create \
   --base <merge-target> \
@@ -787,16 +786,41 @@ Clean up temp branch and skip to loop-check.
 **If APPROVED:**
 Merge the PR:
 ```bash
-gh pr merge "$PR_URL" --repo "$REPO_URL" --merge --delete-branch
+gh pr merge "$PR_URL" --repo "$REPO_URL" --merge
 ```
 
 If merge fails (conflict, branch protection), debug and retry.
 
 ⚠️ **STOP HERE - DO NOT PROCEED UNTIL THE PR IS ACTUALLY MERGED ON GITHUB**
 
-**Step 2: Send MERGED Notification (REQUIRED - DO THIS IMMEDIATELY)**
+**Step 2: Post-merge cleanup (REQUIRED — single command)**
 
-RIGHT NOW, before any cleanup, send MERGED mail to Witness.
+This single command handles closing the MR bead, closing the source issue, and
+deleting the remote polecat branch (respects delete_merged_branches config):
+
+```bash
+# If an open PR was detected in Step 1.6 (direct), pass --skip-branch-delete
+# to avoid auto-closing the PR via head_ref_delete.
+# Otherwise, omit the flag.
+gt mq post-merge <rig> <mr-bead-id>            # normal (no open PR)
+gt mq post-merge <rig> <mr-bead-id> --skip-branch-delete  # open PR exists
+```
+
+The MR bead ID was in the MERGE_READY message or find via:
+```bash
+bd list --type=merge-request --status=open | grep <polecat-name>
+```
+
+Verify the command output shows all steps succeeded (✓ for each).
+
+**Note**: In PR mode, run post-merge cleanup only after `gh pr merge` succeeds.
+The branch is deleted by `gt mq post-merge` after merge proof passes, not by
+`gh pr merge`. The `--skip-branch-delete` flag (gas-fk4) prevents branch deletion
+when an open PR is detected in direct merge mode.
+
+**Step 3: Send MERGED Notification (REQUIRED - ONLY AFTER CLEANUP SUCCEEDS)**
+
+After `gt mq post-merge` succeeds, send MERGED mail to Witness.
 
 **If merge_strategy = "direct":**
 ```bash
@@ -813,36 +837,11 @@ PR: ${PR_URL}
 Merged-At: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ```
 
-Note: In PR mode, MERGED is only sent AFTER `gh pr merge` succeeds — the PR
-is actually merged on GitHub before the witness is notified.
+Note: In PR mode, MERGED is only sent AFTER `gh pr merge` succeeds and
+`gt mq post-merge` verifies the target contains the submitted head.
 
 This signals the Witness to nuke the polecat worktree. WITHOUT THIS NOTIFICATION,
 POLECAT WORKTREES ACCUMULATE INDEFINITELY AND THE LIFECYCLE BREAKS.
-
-**Step 3: Post-merge cleanup (REQUIRED — single command)**
-
-This single command handles closing the MR bead, closing the source issue, and
-deleting the remote polecat branch (respects delete_merged_branches config):
-
-```bash
-# If an open PR was detected in Step 1.6 (direct) or merge_strategy=pr,
-# pass --skip-branch-delete to avoid auto-closing the PR via head_ref_delete.
-# Otherwise, omit the flag.
-gt mq post-merge <rig> <mr-bead-id>            # normal (no open PR)
-gt mq post-merge <rig> <mr-bead-id> --skip-branch-delete  # open PR exists
-```
-
-The MR bead ID was in the MERGE_READY message or find via:
-```bash
-bd list --type=merge-request --status=open | grep <polecat-name>
-```
-
-Verify the command output shows all steps succeeded (✓ for each).
-
-**Note**: In PR mode, the source branch is NOT deleted (it's the PR head branch).
-`delete_merged_branches` is ignored when merge_strategy=pr — the branch is cleaned
-up when the PR is merged on GitHub. The `--skip-branch-delete` flag (gas-fk4) also
-prevents branch deletion when an open PR is detected in direct merge mode.
 
 **Step 4: Archive the MERGE_READY mail (REQUIRED)**
 ```bash
@@ -856,8 +855,8 @@ git branch -d temp
 ```
 
 **VERIFICATION GATE**: You CANNOT proceed to loop-check without:
-- [x] MERGED mail sent to witness (with PR URL if merge_strategy=pr)
 - [x] Post-merge cleanup completed (MR closed, source issue closed, branch deleted)
+- [x] MERGED mail sent to witness (with PR URL if merge_strategy=pr)
 - [x] MERGE_READY mail archived
 
 If you skipped notifications or archiving, GO BACK AND DO THEM NOW.
@@ -893,12 +892,13 @@ description = """
 Summarize this patrol cycle.
 
 **VERIFICATION**: Before generating summary, confirm for each merged branch:
+- [ ] `gt mq post-merge` completed verified cleanup
 - [ ] MERGED mail was sent to witness
-- [ ] MR bead was closed
-- [ ] Source issue was closed
 - [ ] MERGE_READY mail archived
 
-If any notifications, closures, or archiving were missed, do them now!
+If verified cleanup was missed, run `gt mq post-merge`; never manually close
+MR/source issues outside verified cleanup. If notifications or archiving were
+missed, do them now.
 
 Include in summary:
 - Branches merged (count, names)
@@ -1013,7 +1013,7 @@ git fetch origin
 git checkout origin/<branch>
 git merge origin/<target>
 ```
-Resolve the conflicts on the integration branch (force-push), then re-run
+Resolve the conflicts on the integration branch and push it, then re-run
 `gt mq integration land <epic-id>` to retry the consolidation.
 
 ## Why this exists

@@ -623,14 +623,14 @@ const processKillGracePeriod = 2 * time.Second
 // Process:
 // 1. Get the pane's main process PID and its process group ID (PGID)
 // 2. Kill the entire process group (catches reparented processes that stayed in the group)
-// 3. Find all descendant processes recursively (catches any stragglers)
+// 3. Find all descendant processes from one process snapshot (catches any stragglers)
 // 4. Send SIGTERM/SIGKILL to descendants
 // 5. Kill the pane process itself
 // 6. Kill the tmux session
 //
 // The process group kill is critical because:
-// - pgrep -P only finds direct children (PPID matching)
-// - Processes that reparent to init (PID 1) are missed by pgrep
+// - Descendant snapshots only find processes still connected by PPID
+// - Processes that reparent to init (PID 1) are missed by PPID traversal
 // - But they typically stay in the same process group unless they call setsid()
 //
 // This ensures Claude processes and all their children are properly terminated.
@@ -844,24 +844,83 @@ func collectReparentedGroupMembers(pgid string, knownPIDs map[string]bool) []str
 	return reparented
 }
 
-// getAllDescendants recursively finds all descendant PIDs of a process.
+type processSnapshot struct {
+	children map[string][]string
+	names    map[string]string
+}
+
+// getAllDescendants finds all descendant PIDs of a process from one process snapshot.
 // Returns PIDs in deepest-first order so killing them doesn't orphan grandchildren.
 func getAllDescendants(pid string) []string {
+	out, err := exec.Command("ps", "-axo", "pid=,ppid=,comm=").Output()
+	if err != nil {
+		return nil
+	}
+	return descendantsFromPS(pid, out)
+}
+
+func descendantsFromPS(pid string, out []byte) []string {
+	root, ok := normalizeProcessID(pid)
+	if !ok {
+		return nil
+	}
+	return descendantsFromSnapshot(root, parseProcessSnapshot(out))
+}
+
+func parseProcessSnapshot(out []byte) processSnapshot {
+	snapshot := processSnapshot{
+		children: make(map[string][]string),
+		names:    make(map[string]string),
+	}
+
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 2 {
+			continue
+		}
+
+		pid, ok := normalizeProcessID(fields[0])
+		if !ok {
+			continue
+		}
+		ppid, ok := normalizeProcessID(fields[1])
+		if !ok {
+			continue
+		}
+
+		if len(fields) > 2 {
+			snapshot.names[pid] = strings.Join(fields[2:], " ")
+		}
+		snapshot.children[ppid] = append(snapshot.children[ppid], pid)
+	}
+
+	return snapshot
+}
+
+func normalizeProcessID(pid string) (string, bool) {
+	n, err := strconv.Atoi(strings.TrimSpace(pid))
+	if err != nil || n < 0 {
+		return "", false
+	}
+	return strconv.Itoa(n), true
+}
+
+func descendantsFromSnapshot(root string, snapshot processSnapshot) []string {
+	seen := map[string]bool{root: true}
 	var result []string
 
-	// Get direct children using pgrep
-	out, err := exec.Command("pgrep", "-P", pid).Output()
-	if err != nil {
-		return result
+	var walk func(string)
+	walk = func(pid string) {
+		for _, child := range snapshot.children[pid] {
+			if seen[child] {
+				continue
+			}
+			seen[child] = true
+			walk(child)
+			result = append(result, child)
+		}
 	}
-
-	children := strings.Fields(strings.TrimSpace(string(out)))
-	for _, child := range children {
-		// First add grandchildren (recursively) - deepest first
-		result = append(result, getAllDescendants(child)...)
-		// Then add this child
-		result = append(result, child)
-	}
+	walk(root)
 
 	return result
 }
@@ -2438,7 +2497,7 @@ func hasDescendantWithNamesChecked(pid string, names []string, depth int) (bool,
 	return hasDescendantWithNamesPosixChecked(pid, names, depth)
 }
 
-// hasDescendantWithNamesPosix uses pgrep to find child processes on Unix systems.
+// hasDescendantWithNamesPosix walks one ps snapshot on Unix systems.
 func hasDescendantWithNamesPosix(pid string, names []string, depth int) bool {
 	found, _ := hasDescendantWithNamesPosixChecked(pid, names, depth)
 	return found
@@ -2446,50 +2505,69 @@ func hasDescendantWithNamesPosix(pid string, names []string, depth int) bool {
 
 func hasDescendantWithNamesPosixChecked(pid string, names []string, depth int) (bool, error) {
 	const maxDepth = 10
-	if depth > maxDepth {
+	if len(names) == 0 || depth > maxDepth {
 		return false, nil
 	}
-	// Use pgrep to find child processes
-	cmd := exec.Command("pgrep", "-P", pid, "-l")
-	out, err := cmd.Output()
+	root, ok := normalizeProcessID(pid)
+	if !ok {
+		return false, fmt.Errorf("invalid process ID %q", pid)
+	}
+
+	out, err := exec.Command("ps", "-axo", "pid=,ppid=,comm=").Output()
 	if err != nil {
-		if isNoMatchExit(err) {
-			return false, nil
-		}
 		return false, err
 	}
+	return hasDescendantWithNamesFromSnapshot(root, names, depth, parseProcessSnapshot(out)), nil
+}
+
+func hasDescendantWithNamesFromPS(pid string, names []string, depth int, out []byte) bool {
+	root, ok := normalizeProcessID(pid)
+	if !ok {
+		return false
+	}
+	return hasDescendantWithNamesFromSnapshot(root, names, depth, parseProcessSnapshot(out))
+}
+
+func hasDescendantWithNamesFromSnapshot(root string, names []string, depth int, snapshot processSnapshot) bool {
+	const maxDepth = 10
+	if len(names) == 0 || depth > maxDepth {
+		return false
+	}
+
 	// Build a set of names for fast lookup
 	nameSet := make(map[string]bool, len(names))
 	for _, n := range names {
-		nameSet[n] = true
-	}
-	// Check if any child matches, or recursively check grandchildren
-	lines := strings.Split(string(out), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		// Format: "PID name" e.g., "29677 node"
-		parts := strings.Fields(line)
-		if len(parts) >= 2 {
-			childPid := parts[0]
-			childName := parts[1]
-			// Direct match
-			if nameSet[childName] {
-				return true, nil
-			}
-			// Recursive check of descendants
-			found, err := hasDescendantWithNamesChecked(childPid, names, depth+1)
-			if err != nil {
-				return false, err
-			}
-			if found {
-				return true, nil
-			}
+		n = strings.TrimSpace(n)
+		if n != "" {
+			nameSet[n] = true
 		}
 	}
-	return false, nil
+	if len(nameSet) == 0 {
+		return false
+	}
+
+	seen := map[string]bool{root: true}
+	var walk func(string, int) bool
+	walk = func(pid string, currentDepth int) bool {
+		if currentDepth > maxDepth {
+			return false
+		}
+		for _, child := range snapshot.children[pid] {
+			if seen[child] {
+				continue
+			}
+			seen[child] = true
+			if nameSet[filepath.Base(strings.TrimSpace(snapshot.names[child]))] {
+				return true
+			}
+			if walk(child, currentDepth+1) {
+				return true
+			}
+		}
+		return false
+	}
+
+	return walk(root, depth)
 }
 
 func isNoMatchExit(err error) bool {

@@ -25,8 +25,8 @@ type prepushPRProvider struct {
 	mergeCalled bool
 }
 
-func (p *prepushPRProvider) FindPullRequest(string, string, int, string) (*gitpkg.PullRequestInfo, error) {
-	return &gitpkg.PullRequestInfo{Number: 42, State: "OPEN"}, nil
+func (p *prepushPRProvider) FindPullRequest(_ string, _ string, _ int, headSHA string) (*gitpkg.PullRequestInfo, error) {
+	return &gitpkg.PullRequestInfo{Number: 42, State: "OPEN", HeadSHA: headSHA}, nil
 }
 
 func (p *prepushPRProvider) IsPRApproved(*gitpkg.PullRequestInfo) (bool, error) {
@@ -125,13 +125,24 @@ func prepushIssue(id, description string, labels ...string) *beadsdk.Issue {
 	}
 }
 
-func prepushMRIssue(id, branch, target, sourceIssue string) *beadsdk.Issue {
-	desc := beads.FormatMRFields(&beads.MRFields{
+func prepushMRIssue(id, branch, target, sourceIssue string, commitSHA ...string) *beadsdk.Issue {
+	fields := &beads.MRFields{
 		Branch:      branch,
 		Target:      target,
 		SourceIssue: sourceIssue,
 		Worker:      "polecats/test",
 		Rig:         "test-rig",
+	}
+	if len(commitSHA) > 0 {
+		fields.CommitSHA = commitSHA[0]
+	}
+	desc := beads.FormatMRFields(&beads.MRFields{
+		Branch:      fields.Branch,
+		Target:      fields.Target,
+		SourceIssue: fields.SourceIssue,
+		Worker:      fields.Worker,
+		Rig:         fields.Rig,
+		CommitSHA:   fields.CommitSHA,
 	})
 	return prepushIssue(id, desc, "gt:merge-request")
 }
@@ -280,9 +291,10 @@ func TestDoMerge_RechecksSourceFlagsBeforeDirectPush(t *testing.T) {
 			workDir, _, cleanup := testGitRepo(t)
 			defer cleanup()
 			createFeatureBranch(t, workDir, "feature-"+tc.name, tc.name+".txt", tc.name+"\n")
+			commit := run(t, workDir, "git", "rev-parse", "feature-"+tc.name)
 			store := newPrepushStore(
 				prepushIssue("gt-src", ""),
-				prepushMRIssue("gt-mr", "feature-"+tc.name, "main", "gt-src"),
+				prepushMRIssue("gt-mr", "feature-"+tc.name, "main", "gt-src", commit),
 			)
 			e := newPrepushEngineer(t, workDir, store)
 			before := run(t, workDir, "git", "rev-parse", "origin/main")
@@ -297,7 +309,7 @@ func TestDoMerge_RechecksSourceFlagsBeforeDirectPush(t *testing.T) {
 				return &beads.MergeSlotStatus{Available: true, Holder: holder}, nil
 			}
 
-			mr := &MRInfo{ID: "gt-mr", Branch: "feature-" + tc.name, Target: "main", SourceIssue: "gt-src"}
+			mr := &MRInfo{ID: "gt-mr", Branch: "feature-" + tc.name, Target: "main", SourceIssue: "gt-src", CommitSHA: commit}
 			result := e.doMerge(context.Background(), mr)
 			if result.Success || !result.NoMerge {
 				t.Fatalf("expected clean policy rejection before direct push, got: %+v", result)
@@ -341,9 +353,10 @@ func TestDoMerge_RechecksBeforeSubmodulePush(t *testing.T) {
 	run(t, workDir, "git", "checkout", "-b", "feature-submodule", "main")
 	run(t, workDir, "git", "add", "libs/sub")
 	run(t, workDir, "git", "commit", "-m", "feat: update submodule")
+	commit := run(t, workDir, "git", "rev-parse", "feature-submodule")
 	run(t, workDir, "git", "checkout", "main")
 
-	store := newPrepushStore(prepushIssue("gt-src", ""), prepushMRIssue("gt-mr", "feature-submodule", "main", "gt-src"))
+	store := newPrepushStore(prepushIssue("gt-src", ""), prepushMRIssue("gt-mr", "feature-submodule", "main", "gt-src", commit))
 	sourceReads := 0
 	store.beforeGet = func(id string) {
 		if id != "gt-src" {
@@ -357,7 +370,7 @@ func TestDoMerge_RechecksBeforeSubmodulePush(t *testing.T) {
 	}
 	e := newPrepushEngineer(t, workDir, store)
 
-	mr := &MRInfo{ID: "gt-mr", Branch: "feature-submodule", Target: "main", SourceIssue: "gt-src"}
+	mr := &MRInfo{ID: "gt-mr", Branch: "feature-submodule", Target: "main", SourceIssue: "gt-src", CommitSHA: commit}
 	result := e.doMerge(context.Background(), mr)
 	if result.Success || !result.NoMerge {
 		t.Fatalf("expected clean policy rejection before submodule push, got: %+v", result)
@@ -374,7 +387,8 @@ func TestDoMerge_RechecksBeforeSubmodulePush(t *testing.T) {
 func TestDoMergePR_RechecksSourceBeforeMergeAPI(t *testing.T) {
 	workDir, _, cleanup := testGitRepo(t)
 	defer cleanup()
-	store := newPrepushStore(prepushIssue("gt-src", ""), prepushMRIssue("gt-mr-pr", "feature-pr", "main", "gt-src"))
+	commit := "abc123def456"
+	store := newPrepushStore(prepushIssue("gt-src", ""), prepushMRIssue("gt-mr-pr", "feature-pr", "main", "gt-src", commit))
 	e := newPrepushEngineer(t, workDir, store)
 	requireReview := true
 	e.config.RequireReview = &requireReview
@@ -384,7 +398,7 @@ func TestDoMergePR_RechecksSourceBeforeMergeAPI(t *testing.T) {
 	}}
 	e.prProvider = provider
 
-	mr := &MRInfo{ID: "gt-mr-pr", Branch: "feature-pr", Target: "main", SourceIssue: "gt-src"}
+	mr := &MRInfo{ID: "gt-mr-pr", Branch: "feature-pr", Target: "main", SourceIssue: "gt-src", CommitSHA: commit}
 	result := e.doMergePR(context.Background(), mr)
 	if result.Success || !result.NoMerge {
 		t.Fatalf("expected clean policy rejection before PR merge API, got: %+v", result)
@@ -399,11 +413,13 @@ func TestProcessBatch_RechecksBatchBeforePush(t *testing.T) {
 	defer cleanup()
 	createFeatureBranch(t, workDir, "feature-a", "a.txt", "a\n")
 	createFeatureBranch(t, workDir, "feature-b", "b.txt", "b\n")
+	commitA := run(t, workDir, "git", "rev-parse", "feature-a")
+	commitB := run(t, workDir, "git", "rev-parse", "feature-b")
 	store := newPrepushStore(
 		prepushIssue("gt-src-a", ""),
 		prepushIssue("gt-src-b", ""),
-		prepushMRIssue("gt-mr-a", "feature-a", "main", "gt-src-a"),
-		prepushMRIssue("gt-mr-b", "feature-b", "main", "gt-src-b"),
+		prepushMRIssue("gt-mr-a", "feature-a", "main", "gt-src-a", commitA),
+		prepushMRIssue("gt-mr-b", "feature-b", "main", "gt-src-b", commitB),
 	)
 	e := newPrepushEngineer(t, workDir, store)
 	before := run(t, workDir, "git", "rev-parse", "origin/main")
@@ -419,8 +435,8 @@ func TestProcessBatch_RechecksBatchBeforePush(t *testing.T) {
 	}
 
 	batch := []*MRInfo{
-		{ID: "gt-mr-a", Branch: "feature-a", Target: "main", SourceIssue: "gt-src-a"},
-		{ID: "gt-mr-b", Branch: "feature-b", Target: "main", SourceIssue: "gt-src-b"},
+		{ID: "gt-mr-a", Branch: "feature-a", Target: "main", SourceIssue: "gt-src-a", CommitSHA: commitA},
+		{ID: "gt-mr-b", Branch: "feature-b", Target: "main", SourceIssue: "gt-src-b", CommitSHA: commitB},
 	}
 	result := e.ProcessBatch(context.Background(), batch, "main", DefaultBatchConfig())
 	if len(result.Merged) != 0 {
@@ -446,19 +462,21 @@ func TestProcessBatch_RechecksBatchBeforeGates(t *testing.T) {
 	defer cleanup()
 	createFeatureBranch(t, workDir, "feature-a", "a.txt", "a\n")
 	createFeatureBranch(t, workDir, "feature-b", "b.txt", "b\n")
+	commitA := run(t, workDir, "git", "rev-parse", "feature-a")
+	commitB := run(t, workDir, "git", "rev-parse", "feature-b")
 	store := newPrepushStore(
 		prepushIssue("gt-src-a", ""),
 		prepushIssue("gt-src-b", "no_merge: true"),
-		prepushMRIssue("gt-mr-a", "feature-a", "main", "gt-src-a"),
-		prepushMRIssue("gt-mr-b", "feature-b", "main", "gt-src-b"),
+		prepushMRIssue("gt-mr-a", "feature-a", "main", "gt-src-a", commitA),
+		prepushMRIssue("gt-mr-b", "feature-b", "main", "gt-src-b", commitB),
 	)
 	e := newPrepushEngineer(t, workDir, store)
 	e.config.Gates = map[string]*GateConfig{"fail": {Cmd: "false"}}
 	before := run(t, workDir, "git", "rev-parse", "origin/main")
 
 	batch := []*MRInfo{
-		{ID: "gt-mr-a", Branch: "feature-a", Target: "main", SourceIssue: "gt-src-a"},
-		{ID: "gt-mr-b", Branch: "feature-b", Target: "main", SourceIssue: "gt-src-b"},
+		{ID: "gt-mr-a", Branch: "feature-a", Target: "main", SourceIssue: "gt-src-a", CommitSHA: commitA},
+		{ID: "gt-mr-b", Branch: "feature-b", Target: "main", SourceIssue: "gt-src-b", CommitSHA: commitB},
 	}
 	result := e.ProcessBatch(context.Background(), batch, "main", DefaultBatchConfig())
 	if result.Error != nil {
@@ -481,11 +499,13 @@ func TestProcessBatch_RechecksMRCloseReasonBeforePush(t *testing.T) {
 	defer cleanup()
 	createFeatureBranch(t, workDir, "feature-a", "a.txt", "a\n")
 	createFeatureBranch(t, workDir, "feature-b", "b.txt", "b\n")
+	commitA := run(t, workDir, "git", "rev-parse", "feature-a")
+	commitB := run(t, workDir, "git", "rev-parse", "feature-b")
 	store := newPrepushStore(
 		prepushIssue("gt-src-a", ""),
 		prepushIssue("gt-src-b", ""),
-		prepushMRIssue("gt-mr-a", "feature-a", "main", "gt-src-a"),
-		prepushMRIssue("gt-mr-b", "feature-b", "main", "gt-src-b"),
+		prepushMRIssue("gt-mr-a", "feature-a", "main", "gt-src-a", commitA),
+		prepushMRIssue("gt-mr-b", "feature-b", "main", "gt-src-b", commitB),
 	)
 	e := newPrepushEngineer(t, workDir, store)
 	before := run(t, workDir, "git", "rev-parse", "origin/main")
@@ -501,8 +521,8 @@ func TestProcessBatch_RechecksMRCloseReasonBeforePush(t *testing.T) {
 	}
 
 	batch := []*MRInfo{
-		{ID: "gt-mr-a", Branch: "feature-a", Target: "main", SourceIssue: "gt-src-a"},
-		{ID: "gt-mr-b", Branch: "feature-b", Target: "main", SourceIssue: "gt-src-b"},
+		{ID: "gt-mr-a", Branch: "feature-a", Target: "main", SourceIssue: "gt-src-a", CommitSHA: commitA},
+		{ID: "gt-mr-b", Branch: "feature-b", Target: "main", SourceIssue: "gt-src-b", CommitSHA: commitB},
 	}
 	result := e.ProcessBatch(context.Background(), batch, "main", DefaultBatchConfig())
 	if len(result.Merged) != 0 {

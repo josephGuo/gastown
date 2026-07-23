@@ -664,6 +664,13 @@ func (m *Manager) findMRForTerminalCleanup(idOrBranch string, b *beads.Beads) (*
 	return m.issueToMR(issue), nil
 }
 
+// FindMRForPostMerge resolves an MR using the same open/terminal lookup rules
+// as PostMerge, so callers can prove the merge before closing beads.
+func (m *Manager) FindMRForPostMerge(idOrBranch string) (*MergeRequest, error) {
+	b := beads.New(m.rig.BeadsPath())
+	return m.findMRForTerminalCleanup(idOrBranch, b)
+}
+
 // Retry is deprecated - the Refinery agent handles retry logic autonomously.
 // ZFC-compliant: no state file, agent uses beads issue status.
 // The agent will automatically retry failed MRs in its patrol cycle.
@@ -742,6 +749,20 @@ func (m *Manager) PostMerge(idOrBranch string) (*PostMergeResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	return m.postMergeMR(b, mr)
+}
+
+// PostMergeMR performs post-merge cleanup for an MR snapshot that the caller has
+// already verified. This keeps proof and side effects on the same MR metadata.
+func (m *Manager) PostMergeMR(mr *MergeRequest) (*PostMergeResult, error) {
+	if mr == nil {
+		return nil, ErrMRNotFound
+	}
+	b := beads.New(m.rig.BeadsPath())
+	return m.postMergeMR(b, mr)
+}
+
+func (m *Manager) postMergeMR(b *beads.Beads, mr *MergeRequest) (*PostMergeResult, error) {
 	workBeadID := resolveMergedWorkBead(b.ForAgentBead(), mergedWorkBeadCloseRequest{
 		MRID:        mr.ID,
 		Branch:      mr.Branch,
@@ -759,6 +780,7 @@ func (m *Manager) PostMerge(idOrBranch string) (*PostMergeResult, error) {
 		Reason:        string(CloseReasonMerged),
 		MergeCommit:   mr.MergeCommit,
 		AgentBeadHint: mr.AgentBead,
+		ExpectedMR:    mr,
 	})
 	if err != nil {
 		return result, fmt.Errorf("closing MR bead: %w", err)

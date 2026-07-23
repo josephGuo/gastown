@@ -66,6 +66,9 @@ func (g *Git) LookupPullRequest(ref PullRequestRef) (*PullRequestInfo, error) {
 			return nil, err
 		}
 		pr.LookupSource = "recorded-url"
+		if err := validatePullRequestHead(pr, strings.TrimSpace(ref.HeadSHA)); err != nil {
+			return nil, err
+		}
 		return pr, nil
 	}
 	if ref.Number > 0 {
@@ -74,6 +77,9 @@ func (g *Git) LookupPullRequest(ref PullRequestRef) (*PullRequestInfo, error) {
 			return nil, err
 		}
 		pr.LookupSource = "recorded-number"
+		if err := validatePullRequestHead(pr, strings.TrimSpace(ref.HeadSHA)); err != nil {
+			return nil, err
+		}
 		return pr, nil
 	}
 
@@ -208,8 +214,10 @@ func selectPullRequest(raw []ghPullRequest, targetRepo, branch, headSHA, source 
 		if pr.BaseRepo != "" && !strings.EqualFold(pr.BaseRepo, targetRepo) {
 			continue
 		}
-		if headSHA != "" && pr.HeadSHA != "" && pr.HeadSHA != headSHA {
-			continue
+		if headSHA != "" {
+			if pr.HeadSHA == "" || pr.HeadSHA != headSHA {
+				continue
+			}
 		}
 		pr.LookupSource = source
 		matches = append(matches, pr)
@@ -221,6 +229,20 @@ func selectPullRequest(raw []ghPullRequest, targetRepo, branch, headSHA, source 
 		return nil, fmt.Errorf("%w: head %s in %s matched %d PRs: %s", ErrPullRequestAmbiguous, branch, targetRepo, len(matches), describePullRequestMatches(matches))
 	}
 	return matches[0], nil
+}
+
+func validatePullRequestHead(pr *PullRequestInfo, headSHA string) error {
+	headSHA = strings.TrimSpace(headSHA)
+	if headSHA == "" || pr == nil {
+		return nil
+	}
+	if pr.HeadSHA == "" {
+		return fmt.Errorf("PR #%d head SHA is missing", pr.Number)
+	}
+	if pr.HeadSHA != headSHA {
+		return fmt.Errorf("PR #%d head changed from submitted %s to %s", pr.Number, shortSHA(headSHA), shortSHA(pr.HeadSHA))
+	}
+	return nil
 }
 
 func githubRepoFromPullURL(raw string) (string, bool) {

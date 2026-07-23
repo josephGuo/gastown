@@ -739,6 +739,16 @@ func runMqIntegrationLand(cmd *cobra.Command, args []string) error {
 // idempotent re-run, but the epic is already marked done).
 func cleanupIntegrationBranch(g *git.Git, bd *beads.Beads, epicID, branchName, targetBranch string, epicAlreadyClosed bool) []string {
 	var warnings []string
+	branchHead, err := g.PushRemoteBranchTip("origin", branchName)
+	if err != nil {
+		return append(warnings, fmt.Sprintf("could not read remote integration branch: %v", err))
+	}
+	if strings.TrimSpace(branchHead) == "" {
+		return append(warnings, "remote integration branch missing before cleanup")
+	}
+	if err := g.VerifyPushedCommitReachableFromPushTarget("origin", targetBranch, branchHead); err != nil {
+		return append(warnings, fmt.Sprintf("integration branch is not proven on %s: %v", targetBranch, err))
+	}
 
 	// Close epic first — ensures retriable state if branch deletion fails
 	fmt.Printf("Updating epic status...\n")
@@ -755,7 +765,7 @@ func cleanupIntegrationBranch(g *git.Git, bd *beads.Beads, epicID, branchName, t
 	// Delete integration branch (use bare repo git — ref-only operations)
 	fmt.Printf("Deleting integration branch...\n")
 	// Delete remote first
-	if err := g.DeleteRemoteBranch("origin", branchName); err != nil {
+	if err := g.DeleteRemoteBranchIfAt("origin", branchName, branchHead); err != nil {
 		warning := fmt.Sprintf("could not delete remote branch: %v", err)
 		warnings = append(warnings, warning)
 		fmt.Printf("  %s\n", style.Dim.Render(fmt.Sprintf("(%s)", warning)))

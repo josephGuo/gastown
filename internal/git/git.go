@@ -1602,7 +1602,10 @@ func (g *Git) GhPrMergePullRequest(pr *PullRequestInfo, method string) (string, 
 	if pr == nil || (pr.Number == 0 && pr.URL == "") {
 		return "", fmt.Errorf("pull request identity is missing")
 	}
-	args := []string{"pr", "merge", pullRequestSelector(pr), "--" + method, "--delete-branch"}
+	args := []string{"pr", "merge", pullRequestSelector(pr), "--" + method}
+	if head := strings.TrimSpace(pr.HeadSHA); head != "" {
+		args = append(args, "--match-head-commit", head)
+	}
 	if pr.BaseRepo != "" {
 		args = append(args, "--repo", pr.BaseRepo)
 	}
@@ -1636,14 +1639,14 @@ func pullRequestSelector(pr *PullRequestInfo) string {
 	return ""
 }
 
-// FindBitbucketPRNumber returns the Bitbucket PR ID for the given branch, or 0 if none exists.
-// It queries the Bitbucket REST API for open PRs with the branch as source.
-func (g *Git) FindBitbucketPRNumber(workspace, repoSlug, branch string) (int, error) {
+// FindBitbucketPullRequest returns the open Bitbucket PR for branch.
+// It includes the source commit hash so refinery can merge only the submitted head.
+func (g *Git) FindBitbucketPullRequest(workspace, repoSlug, branch, headSHA string) (*PullRequestInfo, error) {
 	// Use curl since there is no official Bitbucket CLI equivalent to gh.
 	// The BITBUCKET_TOKEN env var provides authentication.
 	token := os.Getenv("BITBUCKET_TOKEN")
 	if token == "" {
-		return 0, fmt.Errorf("BITBUCKET_TOKEN is required for Bitbucket PR operations")
+		return nil, fmt.Errorf("BITBUCKET_TOKEN is required for Bitbucket PR operations")
 	}
 	url := fmt.Sprintf("https://api.bitbucket.org/2.0/repositories/%s/%s/pullrequests?q=source.branch.name%%3D%%22%s%%22+AND+state%%3D%%22OPEN%%22&pagelen=1",
 		workspace, repoSlug, branch)
@@ -1651,20 +1654,49 @@ func (g *Git) FindBitbucketPRNumber(workspace, repoSlug, branch string) (int, er
 	cmd.Dir = g.workDir
 	out, err := cmd.Output()
 	if err != nil {
-		return 0, fmt.Errorf("bitbucket API request failed: %w", err)
+		return nil, fmt.Errorf("bitbucket API request failed: %w", err)
 	}
 	var resp struct {
 		Values []struct {
-			ID int `json:"id"`
+			ID    int    `json:"id"`
+			State string `json:"state"`
+			Links struct {
+				HTML struct {
+					Href string `json:"href"`
+				} `json:"html"`
+			} `json:"links"`
+			Source struct {
+				Branch struct {
+					Name string `json:"name"`
+				} `json:"branch"`
+				Commit struct {
+					Hash string `json:"hash"`
+				} `json:"commit"`
+			} `json:"source"`
 		} `json:"values"`
 	}
 	if err := json.Unmarshal(bytes.TrimSpace(out), &resp); err != nil {
-		return 0, fmt.Errorf("failed to parse Bitbucket response: %w", err)
+		return nil, fmt.Errorf("failed to parse Bitbucket response: %w", err)
 	}
 	if len(resp.Values) == 0 {
-		return 0, nil
+		return nil, nil
 	}
-	return resp.Values[0].ID, nil
+	pr := resp.Values[0]
+	info := &PullRequestInfo{
+		Number:       pr.ID,
+		URL:          pr.Links.HTML.Href,
+		State:        strings.ToUpper(pr.State),
+		HeadRefName:  pr.Source.Branch.Name,
+		HeadSHA:      strings.TrimSpace(pr.Source.Commit.Hash),
+		LookupSource: "bitbucket-head",
+	}
+	if info.State == "" {
+		info.State = "OPEN"
+	}
+	if err := validatePullRequestHead(info, headSHA); err != nil {
+		return nil, err
+	}
+	return info, nil
 }
 
 // IsBitbucketPRApproved checks whether a Bitbucket PR has at least one approving reviewer.
@@ -1708,7 +1740,7 @@ func (g *Git) BitbucketPRMerge(workspace, repoSlug string, prID int, strategy st
 	}
 	url := fmt.Sprintf("https://api.bitbucket.org/2.0/repositories/%s/%s/pullrequests/%d/merge",
 		workspace, repoSlug, prID)
-	body := fmt.Sprintf(`{"merge_strategy":"%s","close_source_branch":true}`, strategy)
+	body := fmt.Sprintf(`{"merge_strategy":"%s","close_source_branch":false}`, strategy)
 	cmd := exec.Command("curl", "-s", "-X", "POST",
 		"-H", "Authorization: Bearer "+token,
 		"-H", "Content-Type: application/json",

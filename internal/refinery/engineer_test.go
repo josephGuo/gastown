@@ -1052,6 +1052,180 @@ func TestPostMergeConvoyCheck_NoTownBeads(t *testing.T) {
 	}
 }
 
+func TestHandleMRInfoSuccess_ProofFailurePreservesRemoteBranch(t *testing.T) {
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	branch := "polecat/test/proof-fail"
+	createFeatureBranch(t, workDir, branch, "proof.txt", "not landed\n")
+	commit := run(t, workDir, "git", "rev-parse", branch)
+	run(t, workDir, "git", "push", "origin", branch)
+
+	e := newTestEngineer(t, workDir, g)
+	var buf bytes.Buffer
+	e.SetOutput(&buf)
+	e.HandleMRInfoSuccess(&MRInfo{
+		ID:          "gt-mr-proof-fail",
+		Branch:      branch,
+		Target:      "main",
+		SourceIssue: "gt-proof-fail",
+		CommitSHA:   commit,
+	}, ProcessResult{Success: true, MergeCommit: "unused"})
+
+	if !strings.Contains(buf.String(), "Post-merge proof failed") {
+		t.Fatalf("output missing proof failure:\n%s", buf.String())
+	}
+	if out := run(t, workDir, "git", "ls-remote", "--heads", "origin", branch); !strings.Contains(out, commit) {
+		t.Fatalf("remote branch was not preserved; ls-remote=%q want commit %s", out, commit)
+	}
+}
+
+func TestHandleMRInfoSuccess_VerifiedHeadLeaseDeletesRemoteBranch(t *testing.T) {
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+	installNoPRGH(t)
+	run(t, workDir, "git", "remote", "add", "upstream", "https://github.com/example/repo.git")
+
+	branch := "polecat/test/proof-pass"
+	createFeatureBranch(t, workDir, branch, "proof.txt", "landed\n")
+	commit := run(t, workDir, "git", "rev-parse", branch)
+	run(t, workDir, "git", "push", "origin", branch)
+	run(t, workDir, "git", "checkout", "main")
+	run(t, workDir, "git", "merge", "--ff-only", branch)
+	run(t, workDir, "git", "push", "origin", "main")
+	mergeCommit := run(t, workDir, "git", "rev-parse", "main")
+
+	e := newTestEngineer(t, workDir, g)
+	e.HandleMRInfoSuccess(&MRInfo{
+		ID:        "mr-proof-pass",
+		Branch:    branch,
+		Target:    "main",
+		CommitSHA: commit,
+	}, ProcessResult{Success: true, MergeCommit: mergeCommit})
+
+	if out := run(t, workDir, "git", "ls-remote", "--heads", "origin", branch); strings.TrimSpace(out) != "" {
+		t.Fatalf("remote branch still exists after verified cleanup: %q", out)
+	}
+}
+
+func TestDoMergeDirectPreservesSubmittedHeadForPostMergeProof(t *testing.T) {
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+	installNoPRGH(t)
+
+	branch := "polecat/test/native-merge"
+	createFeatureBranch(t, workDir, branch, "native.txt", "native merge\n")
+	commit := run(t, workDir, "git", "rev-parse", branch)
+	run(t, workDir, "git", "push", "origin", branch)
+
+	e := newTestEngineer(t, workDir, g)
+	mr := &MRInfo{
+		ID:        "mr-native-merge",
+		Branch:    branch,
+		Target:    "main",
+		CommitSHA: commit,
+	}
+	result := e.doMerge(context.Background(), mr)
+	if !result.Success {
+		t.Fatalf("doMerge failed: %s", result.Error)
+	}
+	if err := g.VerifyPushedCommitReachableFromPushTarget("origin", "main", commit); err != nil {
+		t.Fatalf("submitted head not reachable after direct merge: %v", err)
+	}
+	run(t, workDir, "git", "remote", "add", "upstream", "https://github.com/example/repo.git")
+	if !e.HandleMRInfoSuccess(mr, result) {
+		t.Fatal("HandleMRInfoSuccess failed after verified direct merge")
+	}
+	if out := run(t, workDir, "git", "ls-remote", "--heads", "origin", branch); strings.TrimSpace(out) != "" {
+		t.Fatalf("remote branch still exists after native verified cleanup: %q", out)
+	}
+}
+
+func TestDoMergeDirectRejectsAdvancedSourceBranch(t *testing.T) {
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	branch := "polecat/test/native-advanced"
+	createFeatureBranch(t, workDir, branch, "native.txt", "submitted\n")
+	commit := run(t, workDir, "git", "rev-parse", branch)
+	run(t, workDir, "git", "checkout", branch)
+	writeFile(t, workDir, "later.txt", "not submitted\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "feat: later")
+	run(t, workDir, "git", "checkout", "main")
+
+	e := newTestEngineer(t, workDir, g)
+	result := e.doMerge(context.Background(), &MRInfo{
+		ID:        "mr-native-advanced",
+		Branch:    branch,
+		Target:    "main",
+		CommitSHA: commit,
+	})
+	if result.Success {
+		t.Fatal("doMerge succeeded for advanced source branch")
+	}
+	if !strings.Contains(result.Error, "changed from submitted head") {
+		t.Fatalf("doMerge error = %q, want submitted-head drift", result.Error)
+	}
+}
+
+func TestHandleMRInfoSuccess_RemoteLeaseFailurePreservesLocalBranch(t *testing.T) {
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+	installNoPRGH(t)
+	run(t, workDir, "git", "remote", "add", "upstream", "https://github.com/example/repo.git")
+
+	branch := "polecat/test/lease-advanced"
+	createFeatureBranch(t, workDir, branch, "proof.txt", "landed\n")
+	commit := run(t, workDir, "git", "rev-parse", branch)
+	run(t, workDir, "git", "push", "origin", branch)
+	run(t, workDir, "git", "checkout", "main")
+	run(t, workDir, "git", "merge", "--ff-only", commit)
+	run(t, workDir, "git", "push", "origin", "main")
+	mergeCommit := run(t, workDir, "git", "rev-parse", "main")
+	run(t, workDir, "git", "checkout", branch)
+	writeFile(t, workDir, "later.txt", "preserve me\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "feat: preserve branch")
+	advanced := run(t, workDir, "git", "rev-parse", branch)
+	run(t, workDir, "git", "push", "origin", branch)
+	run(t, workDir, "git", "checkout", "main")
+
+	e := newTestEngineer(t, workDir, g)
+	if !e.HandleMRInfoSuccess(&MRInfo{
+		ID:        "mr-lease-advanced",
+		Branch:    branch,
+		Target:    "main",
+		CommitSHA: commit,
+	}, ProcessResult{Success: true, MergeCommit: mergeCommit}) {
+		t.Fatal("HandleMRInfoSuccess returned false")
+	}
+	if out := run(t, workDir, "git", "ls-remote", "--heads", "origin", branch); !strings.Contains(out, advanced) {
+		t.Fatalf("remote advanced branch was not preserved; ls-remote=%q want %s", out, advanced)
+	}
+	if got := run(t, workDir, "git", "rev-parse", branch); got != advanced {
+		t.Fatalf("local branch = %s, want advanced head %s", got, advanced)
+	}
+}
+
+func installNoPRGH(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gh")
+	script := `#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  printf '[]\n'
+  exit 0
+fi
+printf 'unexpected gh args: %s\n' "$*" >&2
+exit 1
+`
+	if err := os.WriteFile(path, []byte(script), 0755); err != nil {
+		t.Fatalf("write fake gh: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
 func TestCheckAndCloseCompletedConvoys_UsesHardenedBDEnvs(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on windows - shell stubs")

@@ -13,6 +13,7 @@ type terminalMRCloseOptions struct {
 	MergeCommit   string
 	AgentBeadHint string
 	MissingOK     bool
+	ExpectedMR    *MergeRequest
 }
 
 type terminalMRCloseResult struct {
@@ -49,6 +50,9 @@ func closeTerminalMR(b *beads.Beads, mrID string, opts terminalMRCloseOptions) (
 	}
 	result.SourceIssue = strings.TrimSpace(fields.SourceIssue)
 	result.AgentBead = firstNonEmpty(opts.AgentBeadHint, fields.AgentBead)
+	if err := validateTerminalMRCloseSnapshot(mrID, fields, opts.ExpectedMR); err != nil {
+		return result, err
+	}
 
 	status := beads.IssueStatus(strings.TrimSpace(issue.Status))
 	switch {
@@ -83,6 +87,36 @@ func closeTerminalMR(b *beads.Beads, mrID string, opts terminalMRCloseOptions) (
 		result.AgentActiveMRClearErr = clearErr
 	}
 	return result, nil
+}
+
+func validateTerminalMRCloseSnapshot(mrID string, fields *beads.MRFields, expected *MergeRequest) error {
+	if expected == nil || fields == nil {
+		return nil
+	}
+	checks := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{name: "branch", got: fields.Branch, want: expected.Branch},
+		{name: "source_issue", got: fields.SourceIssue, want: expected.IssueID},
+		{name: "commit_sha", got: fields.CommitSHA, want: expected.CommitSHA},
+	}
+	if strings.TrimSpace(expected.TargetBranch) != "" {
+		checks = append(checks, struct {
+			name string
+			got  string
+			want string
+		}{name: "target", got: fields.Target, want: expected.TargetBranch})
+	}
+	for _, check := range checks {
+		got := strings.TrimSpace(check.got)
+		want := strings.TrimSpace(check.want)
+		if want != "" && got != want {
+			return fmt.Errorf("MR %s changed after merge proof: %s=%q, verified %q", mrID, check.name, got, want)
+		}
+	}
+	return nil
 }
 
 func firstNonEmpty(values ...string) string {

@@ -434,12 +434,12 @@ func TestSourceValidationRejectsInternalIssues(t *testing.T) {
 
 func TestValidateMergeRequestSourceRejectsMissingAndMismatchedSource(t *testing.T) {
 	missing := &beads.Issue{ID: "gt-mr", Description: "branch: polecat/test/gt-work\n"}
-	if err := validateMergeRequestSource(nil, missing, "gt-work"); err == nil || !strings.Contains(err.Error(), "missing source_issue") {
+	if err := validateMergeRequestSource(missing, "gt-work", &beads.Issue{ID: "gt-work", Type: "task"}); err == nil || !strings.Contains(err.Error(), "missing source_issue") {
 		t.Fatalf("missing source validation error = %v, want missing source_issue", err)
 	}
 
 	mismatched := &beads.Issue{ID: "gt-mr", Description: "source_issue: gt-other\n"}
-	if err := validateMergeRequestSource(nil, mismatched, "gt-work"); err == nil || !strings.Contains(err.Error(), "does not match expected") {
+	if err := validateMergeRequestSource(mismatched, "gt-work", &beads.Issue{ID: "gt-work", Type: "task"}); err == nil || !strings.Contains(err.Error(), "does not match expected") {
 		t.Fatalf("mismatched source validation error = %v, want mismatch", err)
 	}
 }
@@ -829,6 +829,10 @@ func TestIsPolecatActor(t *testing.T) {
 		{"", false},
 		{"single", false},
 		{"polecats/name", false}, // needs rig prefix
+		{"testrig/polecats", false},
+		{"testrig/polecats/", false},
+		{"/polecats/furiosa", false},
+		{"testrig/polecats/furiosa/extra", false},
 	}
 
 	for _, tt := range tests {
@@ -1328,11 +1332,9 @@ func TestDeferredKillNotOnValidationError(t *testing.T) {
 	}
 }
 
-// TestBranchDetectionGuard verifies that the branch detection logic in runDone
-// correctly handles the three states: cwd available, cwd unavailable with GT_BRANCH,
-// and cwd unavailable without GT_BRANCH.
-// This is a regression test for PR #1402 — prevents incorrect main/master detection
-// when the polecat's working directory is deleted.
+// TestBranchDetectionGuard verifies that gt done no longer trusts GT_BRANCH
+// after cwd/worktree ownership is unavailable. The command must fail closed
+// before branch detection instead of reconstructing authority from env.
 func TestBranchDetectionGuard(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -1349,11 +1351,11 @@ func TestBranchDetectionGuard(t *testing.T) {
 			wantBranch:   "current-branch", // simulated
 		},
 		{
-			name:         "cwd unavailable + GT_BRANCH set - uses env var",
+			name:         "cwd unavailable + GT_BRANCH set - still errors",
 			cwdAvailable: false,
 			gtBranch:     "polecat/test-worker",
-			wantError:    false,
-			wantBranch:   "polecat/test-worker",
+			wantError:    true,
+			wantBranch:   "",
 		},
 		{
 			name:         "cwd unavailable + GT_BRANCH empty - returns error",
@@ -1366,10 +1368,10 @@ func TestBranchDetectionGuard(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Simulate the branch detection logic from runDone
+			// Simulate the branch detection guard in runDone.
 			var branch string
 			if !tt.cwdAvailable {
-				branch = tt.gtBranch
+				_ = tt.gtBranch // env branch is intentionally ignored when cwd is unavailable
 			}
 
 			var gotError bool
@@ -1392,41 +1394,26 @@ func TestBranchDetectionGuard(t *testing.T) {
 	}
 }
 
-// TestBranchDetectionCleanupOnError verifies that when branch detection fails
-// (cwdAvailable=false + no GT_BRANCH), the session cleanup backstop is armed
-// so the polecat doesn't get stranded.
+// TestBranchDetectionCleanupOnError verifies that deleted-worktree branch
+// recovery is no longer considered a cleanup path for gt done.
 func TestBranchDetectionCleanupOnError(t *testing.T) {
-	// Simulate the cleanup arming logic from runDone's branch detection error path
+	// Simulate the deleted-worktree guard before branch detection.
 	cwdAvailable := false
 	gtBranch := ""
-	gtPolecat := "test-worker"
-	rigName := "test-rig"
 
 	var branch string
 	if !cwdAvailable {
-		branch = gtBranch
+		_ = gtBranch // ignored without a proven current worktree
 	}
 
 	sessionCleanupNeeded := false
 	if branch == "" && !cwdAvailable {
-		// This mirrors the actual code: arm cleanup before returning error
-		if gtPolecat != "" {
-			sessionCleanupNeeded = true
-		}
+		// The ownership guard returns before arming cleanup or trusting env state.
+		sessionCleanupNeeded = false
 	}
 
-	if !sessionCleanupNeeded {
-		t.Error("sessionCleanupNeeded should be true when branch detection fails with GT_POLECAT set")
-	}
-
-	// Verify the RoleInfo would be constructible from env vars
-	roleInfo := RoleInfo{
-		Role:    RolePolecat,
-		Rig:     rigName,
-		Polecat: gtPolecat,
-	}
-	if roleInfo.Rig != rigName || roleInfo.Polecat != gtPolecat {
-		t.Error("RoleInfo should be constructible from env vars for cleanup")
+	if sessionCleanupNeeded {
+		t.Error("sessionCleanupNeeded should stay false when worktree ownership is unavailable")
 	}
 }
 

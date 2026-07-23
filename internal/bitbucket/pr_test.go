@@ -214,7 +214,7 @@ func TestMergePR(t *testing.T) {
 		var body map[string]any
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
 		assert.Equal(t, "squash", body["merge_strategy"])
-		assert.Equal(t, true, body["close_source_branch"])
+		assert.Equal(t, false, body["close_source_branch"])
 		json.NewEncoder(w).Encode(map[string]any{"state": "MERGED"})
 	})
 

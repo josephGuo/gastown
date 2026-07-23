@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -714,6 +715,118 @@ func TestGetAllDescendants(t *testing.T) {
 				t.Errorf("getAllDescendants returned non-numeric PID: %q", pid)
 			}
 		}
+	}
+}
+
+func TestDescendantsFromPS(t *testing.T) {
+	t.Parallel()
+
+	snapshot := []byte(`
+1 0 root
+2 1 bash
+3 1 zsh
+4 2 node
+5 4 claude
+2 1 bash-duplicate
+bad header row
+8 bad nope
+1 5 root-cycle
+7 99 node
+`)
+
+	got := descendantsFromPS("1", snapshot)
+	want := []string{"5", "4", "2", "3"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("descendantsFromPS deepest-first = %v, want %v", got, want)
+	}
+
+	if got := descendantsFromPS("42", snapshot); len(got) != 0 {
+		t.Fatalf("descendantsFromPS missing root = %v, want empty", got)
+	}
+
+	if got := descendantsFromPS("not-a-pid", snapshot); len(got) != 0 {
+		t.Fatalf("descendantsFromPS invalid root = %v, want empty", got)
+	}
+}
+
+func TestHasDescendantWithNamesFromPS(t *testing.T) {
+	t.Parallel()
+
+	snapshot := []byte(`
+1 0 bash
+2 1 /usr/local/bin/node
+3 2 /Users/peter/bin/claude
+4 1 tmux: client
+5 1 claude-helper
+6 5 nodejs
+7 99 node
+8 0 opencode
+9 8 /opt/homebrew/bin/bun
+10 9 opencode
+1 10 root-cycle
+bad header row
+11 bad nope
+`)
+
+	tests := []struct {
+		name  string
+		pid   string
+		names []string
+		depth int
+		want  bool
+	}{
+		{name: "direct child basename", pid: "1", names: []string{"node"}, want: true},
+		{name: "grandchild basename path", pid: "1", names: []string{"claude"}, want: true},
+		{name: "multi word comm", pid: "1", names: []string{"tmux: client"}, want: true},
+		{name: "exact match only", pid: "1", names: []string{"nodejs"}, want: true},
+		{name: "no substring match", pid: "1", names: []string{"claude-helper"}, want: true},
+		{name: "unrelated ambient ignored", pid: "42", names: []string{"node", "opencode", "bun"}, want: false},
+		{name: "empty names", pid: "1", names: []string{"", "  "}, want: false},
+		{name: "depth limit preserves current semantics", pid: "8", names: []string{"opencode"}, depth: 10, want: false},
+		{name: "invalid root", pid: "nope", names: []string{"node"}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := hasDescendantWithNamesFromPS(tt.pid, tt.names, tt.depth, snapshot)
+			if got != tt.want {
+				t.Fatalf("hasDescendantWithNamesFromPS(%q, %v, %d) = %v, want %v", tt.pid, tt.names, tt.depth, got, tt.want)
+			}
+		})
+	}
+
+	substringSnapshot := []byte(`
+1 0 bash
+2 1 claude-helper
+3 1 nodejs
+`)
+	if hasDescendantWithNamesFromPS("1", []string{"claude", "node"}, 0, substringSnapshot) {
+		t.Fatal("hasDescendantWithNamesFromPS matched a process name substring")
+	}
+}
+
+func TestHasDescendantWithNamesFromPSDoesNotMatchRoot(t *testing.T) {
+	t.Parallel()
+
+	snapshot := []byte(`1 0 node`)
+	if hasDescendantWithNamesFromPS("1", []string{"node"}, 0, snapshot) {
+		t.Fatal("hasDescendantWithNamesFromPS matched the root as its own descendant")
+	}
+}
+
+func TestHasDescendantWithNamesPosixCheckedReportsSnapshotError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX helper test")
+	}
+
+	t.Setenv("PATH", "")
+	found, err := hasDescendantWithNamesPosixChecked("1", []string{"node"}, 0)
+	if err == nil {
+		t.Fatal("hasDescendantWithNamesPosixChecked with missing ps error = nil, want error")
+	}
+	if found {
+		t.Fatal("hasDescendantWithNamesPosixChecked with missing ps found match, want false")
 	}
 }
 

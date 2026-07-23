@@ -379,6 +379,36 @@ func TestBuildRebaseStack_MissingBranch(t *testing.T) {
 	}
 }
 
+func TestBuildRebaseStack_RejectsAdvancedSourceBranch(t *testing.T) {
+	workDir, g, cleanup := testGitRepo(t)
+	defer cleanup()
+
+	branch := "feature-advanced"
+	createFeatureBranch(t, workDir, branch, "a.txt", "submitted\n")
+	commit := run(t, workDir, "git", "rev-parse", branch)
+	run(t, workDir, "git", "checkout", branch)
+	writeFile(t, workDir, "later.txt", "not submitted\n")
+	run(t, workDir, "git", "add", ".")
+	run(t, workDir, "git", "commit", "-m", "feat: later")
+	run(t, workDir, "git", "checkout", "main")
+
+	e := newTestEngineer(t, workDir, g)
+	batch := []*MRInfo{{
+		ID:        "mr-advanced",
+		Branch:    branch,
+		Target:    "main",
+		CommitSHA: commit,
+	}}
+
+	_, _, err := e.BuildRebaseStack(context.Background(), batch, "main")
+	if err == nil {
+		t.Fatal("BuildRebaseStack succeeded for advanced source branch")
+	}
+	if !strings.Contains(err.Error(), "changed from submitted head") {
+		t.Fatalf("BuildRebaseStack error = %q, want submitted-head drift", err.Error())
+	}
+}
+
 // --- ProcessBatch tests ---
 
 func TestProcessBatch_EmptyBatch(t *testing.T) {
@@ -842,7 +872,7 @@ func TestGetMergeMessage_Fallback(t *testing.T) {
 	}
 
 	msg := e.getMergeMessage(mr)
-	if !strings.Contains(msg, "Squash merge") {
+	if !strings.Contains(msg, "Merge") {
 		t.Errorf("expected fallback message, got %q", msg)
 	}
 	if !strings.Contains(msg, "gt-abc") {
